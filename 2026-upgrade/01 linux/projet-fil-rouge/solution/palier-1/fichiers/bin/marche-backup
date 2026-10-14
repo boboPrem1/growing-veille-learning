@@ -1,0 +1,29 @@
+#!/bin/bash
+# Sauvegarde quotidienne de la base « marche » : dump compressé + rotation (7 derniers).
+# Planifié par /etc/cron.d/marche à 02:30. Code de sortie non nul en cas d'échec.
+set -euo pipefail
+
+DEST=/var/backups/marche
+LOG=/var/log/marche/backup.log
+GARDER=7
+fichier="$DEST/marche-$(date +%F_%H%M%S).sql.gz"
+
+journaliser() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+mkdir -p "$DEST"
+chmod 750 "$DEST"
+
+# On écrit d'abord dans un fichier temporaire : une sauvegarde à moitié écrite ne doit
+# jamais porter un nom de sauvegarde valide. pipefail fait échouer le pipe si pg_dump échoue.
+if runuser -u postgres -- pg_dump --no-owner marche | gzip > "$fichier.tmp"; then
+    mv "$fichier.tmp" "$fichier"
+    chmod 640 "$fichier"
+    journaliser "SUCCÈS $fichier ($(du -h "$fichier" | cut -f1))"
+else
+    rm -f "$fichier.tmp"
+    journaliser "ÉCHEC du dump de la base marche"
+    exit 1
+fi
+
+# Rotation : garder les $GARDER plus récentes (tri par date de modification, pas par nom)
+ls -1t "$DEST"/marche-*.sql.gz | tail -n +$((GARDER + 1)) | xargs -r rm --

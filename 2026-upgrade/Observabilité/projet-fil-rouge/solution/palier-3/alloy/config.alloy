@@ -1,0 +1,73 @@
+// Grafana Alloy — Palier 3 : logs Docker → traitement (corrélation, confidentialité) → Loki.
+// L'accès Docker passe par un proxy en lecture seule, plus par le socket brut.
+
+discovery.docker "containers" {
+  host = "tcp://docker-socket-proxy:2375"
+  filter {
+    name   = "label"
+    values = ["com.docker.compose.project=marche"]
+  }
+}
+
+discovery.relabel "containers" {
+  targets = []
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "containers" {
+  host          = "tcp://docker-socket-proxy:2375"
+  targets       = discovery.docker.containers.targets
+  relabel_rules = discovery.relabel.containers.rules
+  labels        = { job = "docker" }
+  forward_to    = [loki.process.marche.receiver]
+}
+
+loki.process "marche" {
+  forward_to = [loki.write.local.receiver]
+
+  stage.match {
+    selector = "{service=~\"gateway|orders|payments\"}"
+
+    stage.json {
+      expressions = { level = "", route = "", trace_id = "" }
+    }
+
+    stage.drop {
+      source              = "route"
+      value               = "/healthz"
+      drop_counter_reason = "healthcheck"
+    }
+
+    stage.labels {
+      values = { level = "" }
+    }
+
+    // trace_id : une valeur différente par requête → JAMAIS en label (cardinalité infinie).
+    // En « structured metadata », il est attaché à la ligne, filtrable, sans créer de stream.
+    stage.structured_metadata {
+      values = { trace_id = "" }
+    }
+
+    // Confidentialité : masquer les numéros de téléphone des clients AVANT stockage.
+    // Chaque groupe capturé est remplacé par `replace` : +228 91 23 45 67 → +228 91 ** ** 67
+    stage.replace {
+      expression = `\+228 \d{2} (\d{2} \d{2}) \d{2}`
+      replace    = "** **"
+    }
+  }
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

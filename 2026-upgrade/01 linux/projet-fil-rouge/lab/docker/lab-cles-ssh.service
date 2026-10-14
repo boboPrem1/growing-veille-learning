@@ -1,0 +1,16 @@
+# Clés d'hôte SSH propres à CHAQUE machine, créées à son premier démarrage (comme cloud-init
+# chez un hébergeur). Générées pendant le build, elles seraient identiques sur toutes les
+# machines du lab — et une machine recréée garderait la même clé.
+# (Pas « Before=ssh.socket » : le socket démarre avant basic.target, une unité ordinaire après ;
+#  le cycle ainsi créé fait abandonner une tâche au hasard par systemd, une fois sur trois.)
+[Unit]
+Description=Clés d'hôte SSH de cette machine
+Before=ssh.service
+ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ssh-keygen -A
+
+[Install]
+WantedBy=multi-user.target

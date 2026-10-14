@@ -1,0 +1,74 @@
+# Alertes Grafana basées sur les LOGS (Loki) : Alertmanager/Prometheus ne savent pas évaluer du LogQL.
+# Fichier obtenu en créant les règles dans l'UI puis en les exportant
+# (Alerting → Alert rules → Export, ou GET /api/v1/provisioning/alert-rules/export?format=yaml),
+# puis nettoyé à la main.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: logs-applicatifs
+    folder: Alertes logs
+    interval: 1m
+    rules:
+      - uid: tempete-de-logs
+        title: TempeteDeLogs
+        condition: C
+        data:
+          - refId: A
+            queryType: instant
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: loki
+            model:
+              refId: A
+              queryType: instant
+              expr: sum by (service) (count_over_time({service=~"gateway|orders|payments", level="warning"}[1m]))
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [300] }
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.service }} émet {{ $values.B.Value | printf "%.0f" }} lignes WARNING par minute'
+          description: Un volume anormal de logs WARNING coûte cher (ingestion Loki) et masque les vrais signaux.
+
+      - uid: paiements-injoignables-logs
+        title: PaiementsInjoignablesDansLesLogs
+        condition: C
+        data:
+          - refId: A
+            queryType: instant
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: loki
+            model:
+              refId: A
+              queryType: instant
+              expr: sum(count_over_time({service="orders", level="error"} |= "payments injoignable" [2m]))
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [5] }
+        noDataState: OK
+        execErrState: Error
+        for: 1m
+        labels:
+          severity: critical
+          service: orders
+        annotations:
+          summary: 'orders n''arrive plus à joindre payments ({{ $values.B.Value | printf "%.0f" }} échecs en 2 min)'

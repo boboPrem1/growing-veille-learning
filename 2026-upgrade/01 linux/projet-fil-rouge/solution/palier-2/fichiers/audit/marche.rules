@@ -1,0 +1,7 @@
+# /etc/audit/rules.d/marche.rules — qui a modifié quoi, et quand ? (VM uniquement : pas d'audit en conteneur)
+-w /etc/marche/        -p wa -k marche_config
+-w /etc/sudoers        -p wa -k sudoers
+-w /etc/sudoers.d/     -p wa -k sudoers
+-w /etc/ssh/sshd_config.d/ -p wa -k sshd_config
+-w /opt/marche/releases/   -p wa -k marche_code
+-w /usr/local/sbin/marchectl -p wa -k marche_outils

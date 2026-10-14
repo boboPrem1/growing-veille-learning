@@ -1,0 +1,25 @@
+# Seule porte d'entrée publique de la stack : Grafana, en HTTPS.
+{
+	# Lab : Caddy signe lui-même les certificats avec sa CA locale (avertissement du navigateur
+	# tant que cette CA n'est pas approuvée). En production, remplacez l'adresse ci-dessous par
+	# un vrai nom de domaine : Caddy obtient et renouvelle seul un certificat Let's Encrypt.
+	local_certs
+}
+
+https://localhost:8443 {
+	encode zstd gzip
+	reverse_proxy grafana:3000
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

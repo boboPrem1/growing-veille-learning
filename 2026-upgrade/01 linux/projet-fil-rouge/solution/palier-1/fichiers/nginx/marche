@@ -1,0 +1,23 @@
+# /etc/nginx/sites-available/marche  (lien dans sites-enabled/, le site « default » est retiré)
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    access_log /var/log/nginx/marche.access.log;
+    error_log  /var/log/nginx/marche.error.log;
+
+    # Les endpoints d'administration (injection de pannes !) ne sortent jamais de la machine
+    location /admin/ {
+        deny all;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 15s;
+    }
+}

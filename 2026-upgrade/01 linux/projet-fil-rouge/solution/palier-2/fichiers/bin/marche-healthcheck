@@ -1,0 +1,33 @@
+#!/bin/bash
+# Palier 2 : contrôle de santé, lancé par marche-healthcheck.timer toutes les 5 minutes.
+# Le client est testé en HTTPS, en faisant confiance à NOTRE certificat (pas de -k).
+set -uo pipefail
+
+LOG=/var/log/marche/health.log
+CA=/etc/ssl/certs/marche.crt
+statut=0
+journaliser() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+for svc in gateway:8000 orders:8001 payments:8002; do
+    nom=${svc%%:*}; port=${svc##*:}
+    if curl -fsS -m 5 -o /dev/null "http://127.0.0.1:$port/healthz"; then
+        journaliser "$nom OK"
+    else
+        journaliser "$nom KO"; statut=1
+    fi
+done
+
+if curl -fsS -m 5 -o /dev/null --cacert "$CA" "https://127.0.0.1/api/products"; then
+    journaliser "nginx OK"
+else
+    journaliser "nginx KO"; statut=1
+fi
+
+# Espace disque des volumes de Marché : prévenir AVANT la saturation
+for point in /var/lib/postgresql /var/backups/marche; do
+    usage=$(df --output=pcent "$point" 2>/dev/null | tail -1 | tr -dc '0-9')
+    if [ -n "$usage" ] && [ "$usage" -ge 85 ]; then journaliser "disque $point ${usage}% KO"; statut=1; fi
+done
+
+[ "$statut" -eq 0 ] || echo "marche-healthcheck : au moins un composant KO, voir $LOG" >&2
+exit "$statut"

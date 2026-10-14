@@ -1,0 +1,66 @@
+# Grafana Mimir 3 — mode monolithique (-target=all), architecture « classique »
+# (sans Kafka), stockage sur le système de fichiers. Configuration de LAB :
+# en production → object storage (S3, GCS, Azure, Ceph RGW, SeaweedFS, Garage…) et
+# plusieurs instances de chaque composant.
+multitenancy_enabled: false      # tenant unique « anonymous » ; en multi-tenant : en-tête X-Scope-OrgID
+
+server:
+  http_listen_port: 9009
+  log_level: warn
+
+common:
+  storage:
+    backend: filesystem
+    filesystem:
+      dir: /data/blocks
+
+blocks_storage:
+  storage_prefix: blocks
+  tsdb:
+    dir: /data/tsdb
+  bucket_store:
+    sync_dir: /data/tsdb-sync
+
+compactor:
+  data_dir: /data/compactor
+  sharding_ring:
+    kvstore:
+      store: memberlist
+
+distributor:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: memberlist
+  # Déduplication de la paire Prometheus HA : Mimir n'accepte les échantillons que
+  # d'UNE réplique par cluster (label `cluster`) ; bascule si elle se tait (label `__replica__`).
+  ha_tracker:
+    enable_ha_tracker: true
+    kvstore:
+      store: memberlist
+
+ingester:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: memberlist
+    replication_factor: 1
+
+store_gateway:
+  sharding_ring:
+    replication_factor: 1
+
+ruler_storage:
+  backend: filesystem
+  filesystem:
+    dir: /data/rules
+
+limits:
+  accept_ha_samples: true
+  ha_cluster_label: cluster
+  ha_replica_label: __replica__
+  max_global_exemplars_per_user: 100000   # 0 par défaut = exemplars refusés
+  compactor_blocks_retention_period: 90d  # rétention long terme
+
+usage_stats:
+  enabled: false

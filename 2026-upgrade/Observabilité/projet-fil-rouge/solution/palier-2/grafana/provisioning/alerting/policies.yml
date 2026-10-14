@@ -1,0 +1,9 @@
+apiVersion: 1
+# Politique de notification des alertes GÉRÉES PAR GRAFANA (celles de Prometheus passent par Alertmanager)
+policies:
+  - orgId: 1
+    receiver: equipe-email
+    group_by: [grafana_folder, alertname, service]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

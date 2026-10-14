@@ -1,0 +1,19 @@
+---
+# bak1 ne fait que STOCKER. Il ne sait pas déchiffrer : restic chiffre côté db1, et le mot de
+# passe du dépôt n'est jamais déposé sur bak1. Un bak1 compromis ne livre aucune donnée.
+- name: Compte de dépôt (sftp seulement, voir la clé autorisée par db1)
+  ansible.builtin.user:
+    name: sauvegarde
+    home: /srv/restic
+    shell: /bin/sh
+    groups: ssh-autorises
+    append: true
+    password: "!"
+
+- name: Dossier des dépôts
+  ansible.builtin.file:
+    path: /srv/restic
+    state: directory
+    owner: sauvegarde
+    group: sauvegarde
+    mode: "0700"

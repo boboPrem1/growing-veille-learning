@@ -1,0 +1,44 @@
+apiVersion: 1
+
+# Migration depuis le Palier 1 : les datasources créées à la main dans l'UI portent les
+# mêmes noms mais des uid aléatoires → Grafana refuse de démarrer (« data source not found »).
+# On les supprime d'abord ; elles sont recréées juste après, cette fois avec des uid fixes.
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+  - name: Loki
+    orgId: 1
+
+# Des `uid` FIXES : les dashboards et règles d'alerte versionnés y font référence.
+# Un uid généré au hasard par l'UI casserait tout sur une autre instance.
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      prometheusType: Prometheus
+      timeInterval: 15s          # = scrape_interval : calibre $__rate_interval
+
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      maxLines: 1000
+
+  - name: Alertmanager
+    type: alertmanager
+    uid: alertmanager
+    access: proxy
+    url: http://alertmanager:9093
+    editable: false
+    jsonData:
+      implementation: prometheus
+      handleGrafanaManagedAlerts: false

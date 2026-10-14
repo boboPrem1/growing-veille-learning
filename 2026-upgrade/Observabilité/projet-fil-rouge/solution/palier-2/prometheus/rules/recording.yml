@@ -1,0 +1,43 @@
+# Convention de nommage : niveau:métrique:opérations
+#   niveau     = labels conservés après agrégation (service, instance…)
+#   métrique   = nom de la métrique d'origine (sans _total)
+#   opérations = ce qu'on lui a appliqué (rate5m, ratio, p95…)
+groups:
+  - name: marche-red
+    interval: 30s
+    rules:
+      - record: service:http_requests:rate5m
+        expr: sum by (service) (rate(http_requests_total{job="app"}[5m]))
+
+      - record: service_route:http_requests:rate5m
+        expr: sum by (service, route) (rate(http_requests_total{job="app"}[5m]))
+
+      - record: service:http_requests_errors:rate5m
+        expr: sum by (service) (rate(http_requests_total{job="app", status=~"5.."}[5m]))
+
+      - record: service:http_requests_errors:ratio_rate5m
+        expr: service:http_requests_errors:rate5m / service:http_requests:rate5m
+
+      - record: service:http_request_duration_seconds:p95_rate5m
+        expr: histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket{job="app"}[5m])))
+
+      - record: service:http_request_duration_seconds:p50_rate5m
+        expr: histogram_quantile(0.50, sum by (service, le) (rate(http_request_duration_seconds_bucket{job="app"}[5m])))
+
+  - name: marche-metier
+    interval: 1m
+    rules:
+      - record: status:marche_orders:rate5m
+        expr: sum by (status) (rate(marche_orders_total[5m]))
+
+      - record: marche:revenue_xof:increase1h
+        expr: sum(increase(marche_revenue_xof_total[1h]))
+
+  - name: hote
+    rules:
+      - record: instance:node_cpu_utilisation:ratio_rate5m
+        expr: 1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))
+
+      # Attention : utilisation = 1 - disponible / total (et non l'inverse)
+      - record: instance:node_memory_utilisation:ratio
+        expr: 1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes

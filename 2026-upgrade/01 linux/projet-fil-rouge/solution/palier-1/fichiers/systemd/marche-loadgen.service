@@ -1,0 +1,17 @@
+[Unit]
+Description=Marché — générateur de trafic (clients simulés, via nginx)
+Wants=nginx.service
+After=nginx.service marche-gateway.service
+
+[Service]
+Type=simple
+User=marche
+Group=marche
+WorkingDirectory=/opt/marche/app
+Environment=GATEWAY_URL=http://127.0.0.1 RPS=2
+ExecStart=/opt/marche/venv/bin/python loadgen.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

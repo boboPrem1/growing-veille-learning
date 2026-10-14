@@ -1,0 +1,246 @@
+# Solution de référence — Palier 2 : alerting, exporters, service discovery, provisioning as code
+#
+#   docker compose up -d --build
+#
+# Grafana http://localhost:3000 · Prometheus :9090 · Alertmanager :9093 · Mailpit :8025
+
+name: marche
+
+x-app: &app
+  build: ./app
+  restart: unless-stopped
+
+# Labels lus par le service discovery Docker de Prometheus (job « docker » de prometheus.yml)
+x-scrape-app: &scrape-app
+  prometheus.scrape: "true"
+  prometheus.job: app
+
+services:
+  # ------------------------------------------------------------------ application
+  postgres:
+    image: postgres:17.11-alpine
+    container_name: marche-postgres
+    environment:
+      POSTGRES_USER: marche
+      POSTGRES_PASSWORD: marche
+      POSTGRES_DB: marche
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marche -d marche"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  gateway:
+    <<: *app
+    container_name: marche-gateway
+    command: ["python", "gateway.py"]
+    environment:
+      SERVICE_NAME: gateway
+      SERVICE_VERSION: "1.1.0"
+      ORDERS_URL: http://orders:8001
+    ports:
+      - "8000:8000"
+    labels:
+      <<: *scrape-app
+      prometheus.port: "8000"
+    depends_on: [orders]
+
+  orders:
+    <<: *app
+    container_name: marche-orders
+    command: ["python", "orders.py"]
+    environment:
+      SERVICE_NAME: orders
+      SERVICE_VERSION: "1.1.0"
+      DATABASE_URL: postgresql://marche:marche@postgres:5432/marche
+      PAYMENTS_URL: http://payments:8002
+    ports:
+      - "127.0.0.1:8001:8001"
+    labels:
+      <<: *scrape-app
+      prometheus.port: "8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      payments:
+        condition: service_started
+
+  payments:
+    <<: *app
+    container_name: marche-payments
+    command: ["python", "payments.py"]
+    environment:
+      SERVICE_NAME: payments
+      SERVICE_VERSION: "1.1.0"
+    ports:
+      - "127.0.0.1:8002:8002"
+    labels:
+      <<: *scrape-app
+      prometheus.port: "8002"
+
+  loadgen:
+    <<: *app
+    container_name: marche-loadgen
+    command: ["python", "loadgen.py"]
+    environment:
+      GATEWAY_URL: http://gateway:8000
+      RPS: "5"
+    depends_on: [gateway]
+
+  # ------------------------------------------------------------------ métriques
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    container_name: prometheus
+    # Le service discovery Docker lit /var/run/docker.sock, réservé à root.
+    # Voir Palier 3 (sécurité) pour la version durcie via un proxy de socket.
+    user: root
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+      - --web.external-url=http://localhost:9090
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.12.1
+    container_name: node-exporter
+    command: [--path.rootfs=/host]
+    pid: host
+    volumes:
+      - /:/host:ro
+    restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.55.1
+    container_name: cadvisor
+    privileged: true
+    devices:
+      - /dev/kmsg
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=15s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.service,com.docker.compose.project
+      - --disable_metrics=percpu,sched,tcp,udp,disk,diskIO,hugetlb,referenced_memory,cpu_topology,resctrl,advtcp,process
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    restart: unless-stopped
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.20.1
+    container_name: postgres-exporter
+    environment:
+      DATA_SOURCE_URI: postgres:5432/marche?sslmode=disable
+      DATA_SOURCE_USER: marche
+      DATA_SOURCE_PASS: marche
+    labels:
+      prometheus.scrape: "true"
+      prometheus.port: "9187"
+      prometheus.job: database
+    restart: unless-stopped
+
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.28.0
+    container_name: blackbox-exporter
+    command: [--config.file=/etc/blackbox/blackbox.yml]
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    ports:
+      - "9115:9115"
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ alerting
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    container_name: alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.external-url=http://localhost:9093
+    volumes:
+      - ./alertmanager:/etc/alertmanager:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "9093:9093"
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit:v1.31.3
+    container_name: mailpit
+    ports:
+      - "8025:8025"     # interface web des e-mails capturés
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ logs
+  loki:
+    image: grafana/loki:3.7.8
+    container_name: loki
+    command: -config.file=/etc/loki/loki-config.yaml
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.20.0
+    container_name: alloy
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy/data
+    ports:
+      - "12345:12345"
+    depends_on: [loki]
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ visualisation
+  grafana:
+    image: grafana/grafana:13.2.2
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: marche-admin
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # SMTP pour les notifications de Grafana Alerting (capturées par Mailpit)
+      GF_SMTP_ENABLED: "true"
+      GF_SMTP_HOST: mailpit:1025
+      GF_SMTP_FROM_ADDRESS: grafana@marche.local
+      GF_SMTP_STARTTLS_POLICY: NoStartTLS
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on: [prometheus, loki]
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  prometheus_data:
+  alertmanager_data:
+  loki_data:
+  alloy_data:
+  grafana_data:

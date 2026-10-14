@@ -1,0 +1,90 @@
+global:
+  resolve_timeout: 5m
+  # Mailpit : faux serveur SMTP qui capture les e-mails (interface : http://localhost:8025)
+  smtp_smarthost: mailpit:1025
+  smtp_from: alertmanager@marche.local
+  smtp_require_tls: false
+
+templates:
+  - /etc/alertmanager/templates/*.tmpl
+
+route:
+  receiver: equipe
+  group_by: [alertname, service]
+  group_wait: 30s        # attendre les alertes « sœurs » avant la 1re notification
+  group_interval: 5m     # délai avant de notifier les nouveautés d'un groupe déjà notifié
+  repeat_interval: 4h    # rappel si l'alerte est toujours active
+  routes:
+    # Sentinelle : envoyée en boucle à un « dead man's switch » externe (healthchecks.io,
+    # Uptime Kuma en mode push…) qui alerte s'il n'en reçoit PLUS. Dans le lab : receiver vide.
+    - matchers:
+        - alertname = "Watchdog"
+      receiver: deadmansswitch
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 1m
+    # Le critique réveille l'astreinte…
+    - matchers:
+        - severity = "critical"
+      receiver: astreinte
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: true       # …ET l'équipe est informée (on continue l'évaluation des routes)
+    # Les alertes liées au paiement vont à l'équipe paiements
+    - matchers:
+        - service =~ "payments|orders"
+      receiver: equipe-paiements
+    # Attrape-tout explicite. Indispensable : dès qu'une sous-route a matché (même avec
+    # continue: true), le receiver de la racine n'est PLUS utilisé. Sans cette route,
+    # une alerte critique du gateway n'irait qu'à l'astreinte.
+    - receiver: equipe
+
+inhibit_rules:
+  # Si un service est injoignable, inutile d'alerter aussi sur ses erreurs ou sa latence
+  - source_matchers:
+      - alertname =~ "CibleInjoignable|SondeEnEchec"
+    target_matchers:
+      - alertname =~ "TauxErreursEleve|LatenceP95Elevee"
+    equal: [service]
+  # PostgreSQL tombé : les erreurs applicatives en sont la conséquence, pas la cause
+  - source_matchers:
+      - alertname = "PostgresIndisponible"
+    target_matchers:
+      - alertname =~ "TauxErreursEleve|AucuneCommandePayee"
+  # Une alerte critique masque sa propre version warning
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: [alertname, service]
+
+receivers:
+  - name: deadmansswitch
+    # En production, par exemple :
+    # webhook_configs:
+    #   - url: https://hc.marche.local/ping/<uuid>
+    #     send_resolved: false
+
+  - name: equipe
+    email_configs:
+      - to: equipe@marche.local
+        send_resolved: true
+        headers:
+          Subject: '{{ template "marche.subject" . }}'
+        html: '{{ template "marche.html" . }}'
+
+  - name: equipe-paiements
+    email_configs:
+      - to: paiements@marche.local
+        send_resolved: true
+        headers:
+          Subject: '{{ template "marche.subject" . }}'
+        html: '{{ template "marche.html" . }}'
+
+  - name: astreinte
+    email_configs:
+      - to: astreinte@marche.local
+        send_resolved: true
+        headers:
+          Subject: '🚨 {{ template "marche.subject" . }}'
+        html: '{{ template "marche.html" . }}'

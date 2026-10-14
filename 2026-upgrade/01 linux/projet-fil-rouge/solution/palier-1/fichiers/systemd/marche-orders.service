@@ -1,0 +1,21 @@
+[Unit]
+Description=Marché — service orders (commandes)
+Documentation=file:///opt/marche/app/orders.py
+# orders a besoin de PostgreSQL : démarrer après lui, et le démarrer s'il ne l'est pas
+Wants=postgresql.service
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=marche
+Group=marche
+WorkingDirectory=/opt/marche/app
+# Secrets (mot de passe de la base) : fichier root:marche 640, jamais dans l'unité
+EnvironmentFile=/etc/marche/marche.env
+Environment=SERVICE_NAME=orders
+ExecStart=/opt/marche/venv/bin/python orders.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

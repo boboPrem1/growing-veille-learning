@@ -1,0 +1,103 @@
+---
+- name: restic
+  ansible.builtin.apt:
+    name: restic
+    state: present
+
+# --- L'accès au dépôt : une clé SSH dédiée, limitée à sftp côté bak1 ---
+- name: Clé SSH dédiée aux sauvegardes
+  ansible.builtin.command: ssh-keygen -q -t ed25519 -N "" -C "sauvegarde@{{ inventory_hostname }}" -f /root/.ssh/id_sauvegarde
+  args:
+    creates: /root/.ssh/id_sauvegarde
+
+- name: Lire la clé publique
+  ansible.builtin.slurp:
+    src: /root/.ssh/id_sauvegarde.pub
+  register: cle_sauvegarde
+
+- name: "bak1 autorise CETTE clé, pour sftp uniquement (exclusive : une ancienne db1 perd l'accès)"
+  ansible.posix.authorized_key:
+    user: sauvegarde
+    key: "{{ cle_sauvegarde.content | b64decode }}"
+    key_options: 'restrict,command="internal-sftp"'
+    exclusive: true
+  delegate_to: "{{ groups['bak'][0] }}"
+
+- name: Lire la clé d'hôte de bak1
+  ansible.builtin.slurp:
+    src: /etc/ssh/ssh_host_ed25519_key.pub
+  register: cle_hote_bak
+  delegate_to: "{{ groups['bak'][0] }}"
+
+- name: db1 connaît bak1 (pas de question « yes/no » dans un timer)
+  ansible.builtin.known_hosts:
+    path: /root/.ssh/known_hosts
+    name: "{{ bak_wg_ip }}"
+    key: "{{ bak_wg_ip }} {{ (cle_hote_bak.content | b64decode).split()[:2] | join(' ') }}"
+
+- name: Connexion SSH vers le dépôt
+  ansible.builtin.blockinfile:
+    path: /root/.ssh/config
+    create: true
+    mode: "0600"
+    marker: "# {mark} SAUVEGARDE (Ansible)"
+    block: |
+      Host {{ bak_wg_ip }}
+          User sauvegarde
+          IdentityFile /root/.ssh/id_sauvegarde
+          IdentitiesOnly yes
+          ServerAliveInterval 30
+
+# --- restic ---
+- name: Dossier de configuration restic
+  ansible.builtin.file:
+    path: /etc/restic
+    state: directory
+    mode: "0700"
+
+- name: Mot de passe du dépôt (il ne quitte jamais db1 et le coffre Ansible)
+  ansible.builtin.copy:
+    dest: /etc/restic/mdp
+    content: "{{ vault_restic_mdp }}"
+    mode: "0600"
+  no_log: true
+
+- name: Environnement restic
+  ansible.builtin.copy:
+    dest: /etc/restic/marche.env
+    mode: "0600"
+    content: |
+      RESTIC_REPOSITORY={{ restic_depot }}
+      RESTIC_PASSWORD_FILE=/etc/restic/mdp
+      RESTIC_CACHE_DIR=/var/cache/restic
+
+- name: Le dépôt existe-t-il ?
+  ansible.builtin.shell: set -a; . /etc/restic/marche.env; restic cat config >/dev/null
+  register: depot
+  changed_when: false
+  failed_when: false
+
+- name: Créer le dépôt (première fois seulement)
+  ansible.builtin.shell: set -a; . /etc/restic/marche.env; restic init
+  when: depot.rc != 0
+
+- name: Scripts de sauvegarde et de restauration
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/usr/local/sbin/{{ item }}"
+    mode: "0700"
+  loop: [marche-sauvegarde, marche-restauration]
+
+- name: Unités systemd
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop: [marche-sauvegarde.service, marche-sauvegarde.timer]
+
+- name: Sauvegarde toutes les heures
+  ansible.builtin.systemd_service:
+    name: marche-sauvegarde.timer
+    state: started
+    enabled: true
+    daemon_reload: true

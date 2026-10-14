@@ -1,0 +1,49 @@
+{
+  "uid": "paiements-detail",
+  "title": "Paiements — Détail",
+  "tags": ["marche", "palier-2", "paiements"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "methode", "label": "Moyen de paiement", "type": "custom",
+        "query": "mobile_money,card", "multi": true, "includeAll": true,
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] },
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Temps de réponse du prestataire (p50 / p95) par moyen",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le, method) (rate(marche_payment_provider_duration_seconds_bucket{method=~\"$methode\"}[$__rate_interval])))", "legendFormat": "p50 {{method}}" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le, method) (rate(marche_payment_provider_duration_seconds_bucket{method=~\"$methode\"}[$__rate_interval])))", "legendFormat": "p95 {{method}}" }
+      ]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Paiements par résultat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 50, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum by (outcome) (rate(marche_payment_provider_duration_seconds_count{method=~\"$methode\"}[$__rate_interval]))", "legendFormat": "{{outcome}}" }
+      ]
+    },
+    {
+      "id": 3, "type": "logs", "title": "Paiements refusés (logs)",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 8 },
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending", "enableLogDetails": true },
+      "targets": [
+        { "refId": "A", "expr": "{service=\"payments\", level=\"warning\"} | json | method=~\"$methode\" | line_format \"commande {{.order_id}} — {{.amount}} XOF — {{.method}} — {{.reason}}\"" }
+      ]
+    }
+  ]
+}

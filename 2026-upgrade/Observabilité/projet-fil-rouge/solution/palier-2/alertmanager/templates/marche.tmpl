@@ -1,0 +1,15 @@
+{{ define "marche.subject" -}}
+[{{ .Status | toUpper }}{{ if eq .Status "firing" }} ×{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }}{{ with .CommonLabels.service }} — {{ . }}{{ end }}
+{{- end }}
+
+{{ define "marche.html" -}}
+<h2>{{ .CommonLabels.alertname }} ({{ .CommonLabels.severity }})</h2>
+{{ range .Alerts -}}
+<p>
+  <b>{{ if eq .Status "firing" }}🔥 En cours{{ else }}✅ Résolue{{ end }}</b> — {{ .Annotations.summary }}<br>
+  {{ with .Annotations.description }}{{ . }}<br>{{ end }}
+  Depuis : {{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}<br>
+  {{ with .Annotations.runbook_url }}<a href="{{ . }}">Runbook</a> · {{ end }}<a href="{{ .GeneratorURL }}">Voir dans Prometheus</a>
+</p>
+{{ end -}}
+{{- end }}

@@ -1,0 +1,86 @@
+# Lab LOCAL du projet fil rouge (alternative au lab LXD sur le VPS, mêmes noms, mêmes IP).
+#   ./lab.sh up 1      → web1 seul (Paliers 1 et 2)
+#   ./lab.sh up 3      → les 6 machines + le poste de contrôle ctl (Palier 3)
+name: marche-lab
+
+x-serveur: &serveur
+  build: .
+  image: marche-lab/ubuntu:24.04
+  privileged: true            # nécessaire pour systemd, pare-feu, LVM, WireGuard dans un conteneur
+  cgroup: host
+  tmpfs: [/run, /run/lock]
+  volumes:
+    - /sys/fs/cgroup:/sys/fs/cgroup:rw
+  restart: unless-stopped
+
+services:
+  web1:
+    <<: *serveur
+    hostname: web1
+    container_name: web1
+    networks: { marchenet: { ipv4_address: 10.10.10.21 } }
+    ports:
+      - "127.0.0.1:2221:22"     # ssh -p 2221 moi@127.0.0.1
+      - "127.0.0.1:8080:80"     # http://127.0.0.1:8080 → nginx de web1
+      - "127.0.0.1:8443:443"
+    profiles: [p1, p3]
+
+  web2:
+    <<: *serveur
+    hostname: web2
+    container_name: web2
+    networks: { marchenet: { ipv4_address: 10.10.10.22 } }
+    ports: ["127.0.0.1:2222:22"]
+    profiles: [p3]
+
+  lb1:
+    <<: *serveur
+    hostname: lb1
+    container_name: lb1
+    networks: { marchenet: { ipv4_address: 10.10.10.11 } }
+    ports: ["127.0.0.1:2211:22"]
+    profiles: [p3]
+
+  lb2:
+    <<: *serveur
+    hostname: lb2
+    container_name: lb2
+    networks: { marchenet: { ipv4_address: 10.10.10.12 } }
+    ports: ["127.0.0.1:2212:22"]
+    profiles: [p3]
+
+  db1:
+    <<: *serveur
+    hostname: db1
+    container_name: db1
+    networks: { marchenet: { ipv4_address: 10.10.10.31 } }
+    ports: ["127.0.0.1:2231:22"]
+    profiles: [p3]
+
+  bak1:
+    <<: *serveur
+    hostname: bak1
+    container_name: bak1
+    networks: { marchenet: { ipv4_address: 10.10.10.41 } }
+    ports: ["127.0.0.1:2241:22"]
+    profiles: [p3]
+
+  # Poste de contrôle Ansible : le dossier du projet y est monté dans /srv/projet, pour
+  # éditer sur votre PC et lancer ansible-playbook depuis ctl.
+  ctl:
+    <<: *serveur
+    hostname: ctl
+    container_name: ctl
+    networks: { marchenet: { ipv4_address: 10.10.10.5 } }
+    ports: ["127.0.0.1:2205:22"]
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - ../..:/srv/projet
+    profiles: [p3]
+
+networks:
+  marchenet:
+    ipam:
+      config:
+        - subnet: 10.10.10.0/24
+          gateway: 10.10.10.1

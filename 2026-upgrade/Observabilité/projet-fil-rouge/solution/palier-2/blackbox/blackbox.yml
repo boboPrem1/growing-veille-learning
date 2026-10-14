@@ -1,0 +1,24 @@
+modules:
+  # Un /healthz qui répond 200 ne suffit pas : on exige aussi "status": "ok" dans le corps.
+  # (orders renvoie 503 + "degraded" quand PostgreSQL est tombé.)
+  http_health:
+    prober: http
+    timeout: 5s
+    http:
+      method: GET
+      valid_status_codes: [200]
+      preferred_ip_protocol: ip4
+      fail_if_body_not_matches_regexp:
+        - '"status":\s*"ok"'
+
+  http_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      preferred_ip_protocol: ip4
+
+  tcp_connect:
+    prober: tcp
+    timeout: 5s
+    tcp:
+      preferred_ip_protocol: ip4

@@ -1,0 +1,385 @@
+{
+  "uid": "marche-slo",
+  "title": "Marché — SLO du parcours client",
+  "tags": [
+    "marche",
+    "palier-3",
+    "slo"
+  ],
+  "timezone": "browser",
+  "refresh": "1m",
+  "schemaVersion": 41,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "links": [
+    {
+      "title": "Services (RED)",
+      "type": "link",
+      "url": "/d/marche-services-red",
+      "icon": "dashboard"
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "slo",
+        "label": "SLO",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "mimir"
+        },
+        "refresh": 2,
+        "query": {
+          "qryType": 1,
+          "query": "label_values(slo:objective:ratio{sloth_service=\"gateway\"}, sloth_slo)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "definition": "label_values(slo:objective:ratio{sloth_service=\"gateway\"}, sloth_slo)",
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "name": "Alertes SLO",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "mimir"
+        },
+        "enable": true,
+        "iconColor": "red",
+        "expr": "ALERTS{alertstate=\"firing\", sloth_service=\"gateway\"}",
+        "step": "60s",
+        "titleFormat": "{{alertname}}",
+        "textFormat": "{{sloth_severity}}"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "SLO « $slo » du gateway",
+      "repeat": "slo",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Objectif",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "none",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(slo:objective:ratio{sloth_service=\"gateway\", sloth_slo=\"$slo\"})",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "SLI mesuré (30 j)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "none",
+        "colorMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "1 - max(slo:sli_error:ratio_rate30d{sloth_service=\"gateway\", sloth_slo=\"$slo\"})",
+          "instant": true
+        }
+      ],
+      "description": "Part des bonnes requêtes sur la fenêtre du SLO."
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Budget d'erreur restant",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.25
+              },
+              {
+                "color": "green",
+                "value": 0.5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "none",
+        "colorMode": "background"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(slo:period_error_budget_remaining:ratio{sloth_service=\"gateway\", sloth_slo=\"$slo\"})",
+          "instant": true
+        }
+      ],
+      "description": "100 % = rien consommé ; 0 % = SLO violé sur la période. Politique : sous 25 %, gel des déploiements risqués."
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Burn rate actuel",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 6
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "graphMode": "none",
+        "colorMode": "background"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(slo:current_burn_rate:ratio{sloth_service=\"gateway\", sloth_slo=\"$slo\"})",
+          "instant": true
+        }
+      ],
+      "description": "1 = on consomme le budget exactement au rythme qui l'épuise en fin de période. 14,4 sur 1 h = 2 % du budget mensuel en 1 h."
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Burn rate par fenêtre",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "description": "Les alertes multi-fenêtres combinent une fenêtre longue (fiabilité) et une courte (réactivité et fin d'alerte rapide).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 0,
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 6
+              },
+              {
+                "color": "red",
+                "value": 14.4
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "5m",
+          "expr": "max(slo:sli_error:ratio_rate5m{sloth_service=\"gateway\", sloth_slo=\"$slo\"}) / max(slo:error_budget:ratio{sloth_service=\"gateway\", sloth_slo=\"$slo\"})",
+          "legendFormat": "burn rate 5m"
+        },
+        {
+          "refId": "1h",
+          "expr": "max(slo:sli_error:ratio_rate1h{sloth_service=\"gateway\", sloth_slo=\"$slo\"}) / max(slo:error_budget:ratio{sloth_service=\"gateway\", sloth_slo=\"$slo\"})",
+          "legendFormat": "burn rate 1h"
+        },
+        {
+          "refId": "6h",
+          "expr": "max(slo:sli_error:ratio_rate6h{sloth_service=\"gateway\", sloth_slo=\"$slo\"}) / max(slo:error_budget:ratio{sloth_service=\"gateway\", sloth_slo=\"$slo\"})",
+          "legendFormat": "burn rate 6h"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Budget d'erreur restant sur la période",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "fillOpacity": 20
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(slo:period_error_budget_remaining:ratio{sloth_service=\"gateway\", sloth_slo=\"$slo\"})",
+          "legendFormat": "budget restant"
+        }
+      ]
+    }
+  ]
+}

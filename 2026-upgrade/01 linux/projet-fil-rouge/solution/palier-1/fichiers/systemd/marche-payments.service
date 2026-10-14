@@ -1,0 +1,16 @@
+[Unit]
+Description=Marché — service payments (prestataire de paiement simulé)
+After=network.target
+
+[Service]
+Type=simple
+User=marche
+Group=marche
+WorkingDirectory=/opt/marche/app
+Environment=SERVICE_NAME=payments
+ExecStart=/opt/marche/venv/bin/python payments.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,40 @@
+---
+- name: Outils WireGuard
+  ansible.builtin.apt:
+    name: wireguard-tools
+    state: present
+
+# La clé privée est générée SUR la machine et n'en sort jamais. Seule la clé publique
+# est lue par Ansible pour être donnée à l'autre extrémité.
+- name: Clé privée (générée une seule fois)
+  ansible.builtin.shell: umask 077 && wg genkey > /etc/wireguard/prive.key
+  args:
+    creates: /etc/wireguard/prive.key
+
+- name: Clé publique
+  ansible.builtin.shell: wg pubkey < /etc/wireguard/prive.key
+  register: wg_pub
+  changed_when: false
+
+- name: Retenir la clé publique pour les autres machines
+  ansible.builtin.set_fact:
+    wg_cle_publique: "{{ wg_pub.stdout }}"
+
+- name: Lire la clé privée (pour le fichier de configuration)
+  ansible.builtin.slurp:
+    src: /etc/wireguard/prive.key
+  register: wg_prive
+  no_log: true
+
+- name: Configuration wg0
+  ansible.builtin.template:
+    src: wg0.conf.j2
+    dest: /etc/wireguard/wg0.conf
+    mode: "0600"
+  notify: Redémarrer wg0
+
+- name: Tunnel actif au démarrage
+  ansible.builtin.systemd_service:
+    name: wg-quick@wg0
+    state: started
+    enabled: true

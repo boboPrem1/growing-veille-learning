@@ -1,0 +1,179 @@
+# Règles d'alerte de Marché.
+# Principes : alerter sur les SYMPTÔMES vus par l'utilisateur (erreurs, lenteur) en « critical »,
+# sur les CAUSES probables (CPU, mémoire, disque) en « warning ». Chaque alerte a un runbook.
+# Les durées `for` sont raccourcies pour le lab ; en production, comptez 2 à 3 fois plus.
+groups:
+  - name: disponibilite
+    rules:
+      - alert: CibleInjoignable
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} / {{ $labels.instance }} ne répond plus"
+          description: "Prometheus n'arrive plus à scraper {{ $labels.instance }} depuis plus d'une minute."
+          runbook_url: "https://git.marche.local/observabilite/runbooks#cibleinjoignable"
+
+      - alert: SondeEnEchec
+        expr: probe_success == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "La sonde {{ $labels.job }} vers {{ $labels.instance }} échoue"
+          description: "Vu de l'extérieur, {{ $labels.instance }} ne répond pas correctement."
+          runbook_url: "https://git.marche.local/observabilite/runbooks#sondeenechec"
+
+      - alert: PostgresIndisponible
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: postgres
+        annotations:
+          summary: "PostgreSQL injoignable par postgres-exporter"
+          runbook_url: "https://git.marche.local/observabilite/runbooks#postgresindisponible"
+
+  - name: application
+    rules:
+      - alert: TauxErreursEleve
+        # Le « and » évite d'alerter sur 1 erreur sur 2 requêtes la nuit
+        expr: |
+          service:http_requests_errors:ratio_rate5m > 0.05
+          and service:http_requests:rate5m > 0.1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} : {{ $value | humanizePercentage }} de réponses 5xx"
+          description: "Plus de 5 % des requêtes de {{ $labels.service }} échouent depuis 2 minutes."
+          runbook_url: "https://git.marche.local/observabilite/runbooks#tauxerreurseleve"
+
+      - alert: LatenceP95Elevee
+        expr: service:http_request_duration_seconds:p95_rate5m > 1
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} : p95 à {{ $value | humanizeDuration }}"
+          description: "5 % des requêtes de {{ $labels.service }} prennent plus d'une seconde."
+          runbook_url: "https://git.marche.local/observabilite/runbooks#latencep95elevee"
+
+      - alert: AucuneCommandePayee
+        # Le silence est suspect : 0 commande payée en 10 min alors que le trafic existe.
+        # absent() couvre le cas où la série a disparu (service orders arrêté).
+        expr: |
+          sum(increase(marche_orders_total{status="paid"}[10m])) == 0
+          or absent(marche_orders_total{status="paid"})
+        for: 5m
+        labels:
+          severity: critical
+          service: orders
+        annotations:
+          summary: "Aucune commande payée depuis 15 minutes"
+          runbook_url: "https://git.marche.local/observabilite/runbooks#aucunecommandepayee"
+
+      - alert: RefusPaiementAnormaux
+        expr: |
+          sum(rate(marche_orders_total{status="payment_declined"}[15m]))
+          / sum(rate(marche_orders_total[15m])) > 0.10
+        for: 10m
+        labels:
+          severity: warning
+          service: payments
+        annotations:
+          summary: "{{ $value | humanizePercentage }} des paiements sont refusés (normal : ~3 %)"
+          runbook_url: "https://git.marche.local/observabilite/runbooks#refuspaiementanormaux"
+
+  - name: ressources
+    rules:
+      - alert: HoteCPUSature
+        expr: instance:node_cpu_utilisation:ratio_rate5m > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU de l'hôte à {{ $value | humanizePercentage }}"
+
+      - alert: HoteMemoireSaturee
+        expr: instance:node_memory_utilisation:ratio > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mémoire de l'hôte à {{ $value | humanizePercentage }}"
+
+      - alert: DisquePleinSous24h
+        # Régression linéaire sur 6 h, projetée à 24 h : alerte AVANT l'incident
+        expr: |
+          predict_linear(node_filesystem_avail_bytes{mountpoint=~"/|/var/lib"}[6h], 24 * 3600) < 0
+          and node_filesystem_avail_bytes{mountpoint=~"/|/var/lib"} / node_filesystem_size_bytes < 0.2
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.mountpoint }} sera plein dans moins de 24 h au rythme actuel"
+
+      - alert: ConteneurCPUSature
+        expr: sum by (name) (rate(container_cpu_usage_seconds_total{name=~"marche-.*"}[5m])) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.name }} consomme {{ $value | humanize }} cœur(s) CPU"
+
+      - alert: ConteneurFuiteMemoire
+        # Croissance continue de la mémoire (> 100 Ko/s en moyenne sur 15 min)…
+        # …uniquement pour les conteneurs démarrés depuis plus de 15 min : juste après un
+        # démarrage, la mémoire monte normalement (imports, caches) → faux positifs garantis.
+        expr: |
+          deriv(container_memory_working_set_bytes{name=~"marche-.*"}[15m]) > 100e3
+          and on (name) (time() - container_start_time_seconds{name=~"marche-.*"} > 900)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "La mémoire de {{ $labels.name }} augmente de {{ $value | humanize1024 }}o/s"
+          runbook_url: "https://git.marche.local/observabilite/runbooks#conteneurfuitememoire"
+
+  # --------------------------------------------------------------------------
+  # Méta-monitoring : qui surveille les surveillants ?
+  # --------------------------------------------------------------------------
+  - name: meta-observabilite
+    rules:
+      # « Dead man's switch » : TOUJOURS en alerte. Il est routé vers un service externe
+      # qui, lui, s'inquiète s'il ne reçoit PLUS rien (Prometheus ou Alertmanager mort).
+      - alert: Watchdog
+        expr: vector(1)
+        labels:
+          severity: none
+        annotations:
+          summary: "Alerte sentinelle : la chaîne d'alerting fonctionne"
+
+      - alert: RemoteWriteEnEchec
+        expr: |
+          rate(prometheus_remote_storage_samples_failed_total[5m]) > 0
+          or prometheus_remote_storage_highest_timestamp_in_seconds
+             - ignoring(remote_name, url) group_right prometheus_remote_storage_queue_highest_sent_timestamp_seconds > 120
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} n'arrive plus à envoyer ses échantillons à Mimir"
+
+      - alert: AlertmanagerClusterDegrade
+        expr: min(alertmanager_cluster_members) < 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Le cluster Alertmanager ne compte plus que {{ $value }} membre(s)"
+
+      - alert: CollectorRefuseDesSpans
+        expr: sum(rate(otelcol_receiver_refused_spans_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "L'OTel Collector refuse des spans (memory_limiter ? backend saturé ?)"

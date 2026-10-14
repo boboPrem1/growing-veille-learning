@@ -1,0 +1,9 @@
+# /etc/cron.d/marche — tâches planifiées de Marché
+# Rappels (cours 01, module 15) : environnement minimal → PATH explicite ; dans /etc/cron.d
+# il y a une colonne UTILISATEUR ; on garde la sortie (pas de >/dev/null).
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=""
+
+*/5 * * * *  root  /usr/local/bin/marche-healthcheck >> /var/log/marche/cron.log 2>&1
+30 2 * * *   root  /usr/local/bin/marche-backup >> /var/log/marche/cron.log 2>&1

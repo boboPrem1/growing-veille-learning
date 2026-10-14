@@ -1,0 +1,23 @@
+[Unit]
+Description=Marché — générateur de trafic (clients simulés, en HTTPS via nginx)
+PartOf=marche.target
+Wants=nginx.service
+After=nginx.service marche@gateway.service
+
+[Service]
+Type=simple
+User=marche
+Group=marche
+WorkingDirectory=/opt/marche/current
+Environment=GATEWAY_URL=https://127.0.0.1 RPS=2 SSL_CA_FILE=/etc/ssl/certs/marche.crt
+ExecStart=/opt/marche/current/venv/bin/python loadgen.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+MemoryMax=200M
+
+[Install]
+WantedBy=marche.target

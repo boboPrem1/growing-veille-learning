@@ -1,0 +1,7 @@
+# Authentification de l'UI et de l'API de Prometheus (--web.config.file).
+# Le mot de passe est stocké HACHÉ (bcrypt) : on peut versionner ce fichier.
+# Générer un hash :  docker run --rm caddy:2.11.4-alpine caddy hash-password --plaintext 'secret'
+#   (ou : htpasswd -nBC 12 "" | tr -d ':\n')
+# Le mot de passe en clair correspondant vit dans secrets/prometheus_password.txt (non versionné).
+basic_auth_users:
+  admin: $2a$14$atd1bdIF9wHm2NfnhPWiE.7a5UVtlkNaQDXGgPUgxPotIA40TOKF.

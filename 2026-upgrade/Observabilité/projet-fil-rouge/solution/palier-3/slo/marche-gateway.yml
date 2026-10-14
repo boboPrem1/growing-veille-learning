@@ -1,0 +1,59 @@
+# SLO du parcours client de Marché, mesurés à l'entrée (gateway).
+# Génération des règles Prometheus :
+#   docker run --rm -v "$PWD:/w" -w /w ghcr.io/slok/sloth:v0.16.0 \
+#     generate -i slo/marche-gateway.yml -o prometheus/rules/slo-marche-gateway.yml
+version: "prometheus/v1"
+service: "gateway"
+labels:
+  owner: "equipe-plateforme"
+  tier: "1"
+slos:
+  # SLO 1 — Disponibilité : 99,5 % des requêtes ne renvoient pas de 5xx (sur 30 jours)
+  #   budget d'erreur = 0,5 % ≈ 3 h 36 min de panne totale par mois
+  - name: "disponibilite"
+    objective: 99.5
+    description: "Les clients reçoivent une réponse sans erreur serveur."
+    sli:
+      events:
+        # « or vector(0) » : sans aucune 5xx, sum(rate(...)) ne renvoie RIEN (pas 0) et le SLI disparaît
+        error_query: sum(rate(http_requests_total{job="app", service="gateway", route!="/healthz", status=~"5.."}[{{.window}}])) or vector(0)
+        total_query: sum(rate(http_requests_total{job="app", service="gateway", route!="/healthz"}[{{.window}}]))
+    alerting:
+      name: SLODisponibiliteGateway
+      labels:
+        service: gateway
+      annotations:
+        summary: "Le budget d'erreur de disponibilité du gateway brûle trop vite"
+        runbook_url: "https://git.marche.local/observabilite/runbooks#slo-disponibilite"
+      page_alert:
+        labels:
+          severity: critical
+      ticket_alert:
+        labels:
+          severity: warning
+
+  # SLO 2 — Latence : 99 % des requêtes servies en moins de 500 ms (sur 30 jours)
+  #   « bonnes » requêtes = bucket le="0.5" de l'histogramme ; mauvaises = total - bonnes
+  - name: "latence"
+    objective: 99
+    description: "Les clients obtiennent une réponse en moins de 500 ms."
+    sli:
+      events:
+        error_query: |
+          sum(rate(http_request_duration_seconds_count{job="app", service="gateway", route!="/healthz"}[{{.window}}]))
+          -
+          sum(rate(http_request_duration_seconds_bucket{job="app", service="gateway", route!="/healthz", le="0.5"}[{{.window}}]))
+        total_query: sum(rate(http_request_duration_seconds_count{job="app", service="gateway", route!="/healthz"}[{{.window}}]))
+    alerting:
+      name: SLOLatenceGateway
+      labels:
+        service: gateway
+      annotations:
+        summary: "Le budget d'erreur de latence du gateway brûle trop vite"
+        runbook_url: "https://git.marche.local/observabilite/runbooks#slo-latence"
+      page_alert:
+        labels:
+          severity: critical
+      ticket_alert:
+        labels:
+          severity: warning

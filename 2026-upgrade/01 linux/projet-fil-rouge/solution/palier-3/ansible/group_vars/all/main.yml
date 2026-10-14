@@ -1,0 +1,26 @@
+---
+# Variables communes à toutes les machines. Les secrets sont dans vault.yml (chiffré).
+fuseau: Africa/Lome
+
+# Votre compte d'administration personnel (Palier 1), recréé partout
+admin_utilisateur: moi
+admin_cle_publique: "{{ lookup('ansible.builtin.file', lookup('ansible.builtin.env', 'HOME') + '/.ssh/id_ed25519.pub') }}"
+# Mot de passe (pour sudo) haché UNE fois, avec un sel fixe : sans sel fixe, le hachage change
+# à chaque exécution et la tâche « user » rapporte « changed » à chaque fois.
+admin_mdp_hache: "{{ vault_admin_mdp | password_hash('sha512', vault_admin_sel) }}"
+
+# D'où l'on administre : la passerelle du lab (rebond par le VPS, ports Docker) et ctl
+reseau_admin: [10.10.10.1, 10.10.10.5]
+
+vip: 10.10.10.100
+pki: "{{ lookup('ansible.builtin.env', 'HOME') }}/pki-marche"   # sur ctl, hors du dépôt
+db_hote: "{{ hostvars[groups['db'][0]]['ansible_host'] }}"
+bak_wg_ip: "{{ hostvars[groups['bak'][0]]['wg_ip'] }}"
+wg_port: 51820
+
+# Livraison : les archives produites par outils/empaqueter.sh (dossier du projet monté sur ctl)
+marche_version: 1.1.0
+marche_livraison: /srv/projet/livraison
+
+# Sauvegardes restic, déposées sur bak1 À TRAVERS le tunnel WireGuard
+restic_depot: "sftp:sauvegarde@{{ bak_wg_ip }}:/srv/restic/marche"

@@ -1,0 +1,151 @@
+# Palier 3 — Configuration PARTAGÉE par les deux répliques prometheus-a et prometheus-b.
+# Elles scrapent exactement les mêmes cibles ; seul le label __replica__ diffère.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  # Prometheus 3 accepte les noms UTF-8 (ex. `server.address`, exposé par l'OTel Collector),
+  # mais Mimir (et beaucoup d'outils) les refusent encore. On les échappe dès le scrape :
+  # server.address → server_address.
+  metric_name_validation_scheme: legacy
+  metric_name_escaping_scheme: underscores
+  external_labels:
+    env: lab
+    cluster: marche                 # identifie la paire HA auprès de Mimir
+    __replica__: ${PROM_REPLICA}    # a ou b ; lu par Mimir pour dédoublonner la paire
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  # Sans ceci, les alertes de a et b diffèrent par __replica__ : Alertmanager ne les
+  # dédoublonne pas et chaque notification part en double.
+  alert_relabel_configs:
+    - action: labeldrop
+      regex: __replica__
+  alertmanagers:
+    - static_configs:
+        # Chaque réplique notifie LES DEUX Alertmanager (qui forment un cluster)
+        - targets: ["alertmanager-a:9093", "alertmanager-b:9093"]
+
+# Stockage long terme + déduplication HA dans Mimir
+remote_write:
+  - url: http://mimir:9009/api/v1/push
+    send_exemplars: true
+    queue_config:
+      max_samples_per_send: 2000
+      batch_send_deadline: 5s
+
+scrape_configs:
+  # Les deux répliques se scrapent mutuellement (endpoints protégés par mot de passe)
+  - job_name: prometheus
+    basic_auth:
+      username: admin
+      password_file: /run/secrets/prometheus_password
+    static_configs:
+      - targets: ["prometheus-a:9090", "prometheus-b:9090"]
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager-a:9093", "alertmanager-b:9093"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels:
+          host: docker-host
+
+  # Service discovery Docker — via le proxy de socket (lecture seule, API filtrée)
+  - job_name: docker
+    docker_sd_configs:
+      - host: tcp://docker-socket-proxy:2375
+        refresh_interval: 15s
+        filters:
+          - name: label
+            values: ["prometheus.scrape=true"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name, __meta_docker_container_label_prometheus_port]
+        regex: /(.+);(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - source_labels: [__meta_docker_container_label_prometheus_path]
+        regex: (.+)
+        target_label: __metrics_path__
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.+)
+        target_label: container
+      - source_labels: [__meta_docker_container_label_prometheus_job]
+        regex: (.+)
+        target_label: job
+
+  - job_name: cadvisor
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["cadvisor:8080"]
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: container_(tasks_state|memory_failures_total|blkio_device_usage_total|network_(receive|transmit)_(errors|packets_dropped)_total)
+        action: drop
+      - source_labels: [name]
+        regex: ""
+        action: drop
+
+  - job_name: blackbox-http
+    metrics_path: /probe
+    params:
+      module: [http_health]
+    static_configs:
+      - targets:
+          - http://gateway:8000/healthz
+          - http://orders:8001/healthz
+          - http://payments:8002/healthz
+      - targets:
+          - http://grafana:3000/api/health
+        labels:
+          __param_module: http_2xx
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      # Label service (gateway, orders…) extrait de l'URL : sans lui, l'inhibition
+      # « sonde en échec → masquer les erreurs du même service » ne peut pas fonctionner
+      - source_labels: [__param_target]
+        regex: https?://([^:/]+).*
+        target_label: service
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  - job_name: blackbox-tcp
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    static_configs:
+      - targets: ["postgres:5432"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # Méta-monitoring : chaque brique de la stack est elle-même observée
+  - job_name: observabilite
+    static_configs:
+      - targets: ["blackbox-exporter:9115"]
+        labels: { component: blackbox-exporter }
+      - targets: ["loki:3100"]
+        labels: { component: loki }
+      - targets: ["alloy:12345"]
+        labels: { component: alloy }
+      - targets: ["grafana:3000"]
+        labels: { component: grafana }
+      - targets: ["tempo:3200"]
+        labels: { component: tempo }
+      - targets: ["mimir:9009"]
+        labels: { component: mimir }
+      - targets: ["otel-collector:8888"]
+        labels: { component: otel-collector }

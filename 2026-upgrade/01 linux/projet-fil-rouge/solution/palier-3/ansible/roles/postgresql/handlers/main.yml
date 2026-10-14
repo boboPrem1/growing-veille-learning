@@ -1,0 +1,11 @@
+---
+# « postgresql » n'est qu'une enveloppe : c'est l'instance postgresql@<version>-main qui compte
+- name: Redémarrer postgresql
+  ansible.builtin.systemd_service:
+    name: "postgresql@{{ pg_version.stdout }}-main"
+    state: restarted
+
+- name: Recharger postgresql
+  ansible.builtin.systemd_service:
+    name: "postgresql@{{ pg_version.stdout }}-main"
+    state: reloaded

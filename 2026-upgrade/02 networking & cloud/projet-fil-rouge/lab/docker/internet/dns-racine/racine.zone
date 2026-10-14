@@ -1,0 +1,10 @@
+; La zone racine de l'Internet du lab. Comme la vraie : elle ne connaît que les TLD,
+; et DÉLÈGUE chacun à ses serveurs (NS), avec l'adresse de ces serveurs (glue).
+$TTL 86400
+.               IN SOA  a.racine.test. hostmaster.racine.test. ( 2026090101 1800 900 604800 86400 )
+.               IN NS   a.racine.test.
+a.racine.test.  IN A    192.0.2.53
+
+; Délégation du TLD « test. »
+test.           IN NS   ns.tld.test.
+ns.tld.test.    IN A    192.0.2.54

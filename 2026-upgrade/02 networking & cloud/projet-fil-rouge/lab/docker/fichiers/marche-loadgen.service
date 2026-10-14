@@ -1,0 +1,18 @@
+# Générateur de trafic : des « clients » qui naviguent et commandent en continu.
+# Configuration : /etc/marche/loadgen.env (GATEWAY_URL, RPS, SSL_CA_FILE)
+[Unit]
+Description=Marché — générateur de trafic
+After=network-online.target
+
+[Service]
+Type=simple
+User=marche
+WorkingDirectory=/opt/marche/app
+EnvironmentFile=/etc/marche/loadgen.env
+Environment=SERVICE_NAME=loadgen
+ExecStart=/opt/marche/venv/bin/python loadgen.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,3 @@
+# /etc/sudoers.d/marche-deploy — à éditer avec : sudo visudo -f /etc/sudoers.d/marche-deploy
+# L'utilisateur deploy exploite Marché (déploiement, retour arrière, sauvegarde) et RIEN d'autre.
+deploy ALL=(root) NOPASSWD: /usr/local/sbin/marchectl

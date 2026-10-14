@@ -1,0 +1,11 @@
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: equipe-email
+    receivers:
+      - uid: equipe-email
+        type: email
+        settings:
+          addresses: equipe@marche.local
+          singleEmail: true
+        disableResolveMessage: false

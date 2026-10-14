@@ -1,0 +1,257 @@
+# Lab du projet fil rouge Networking & Cloud — voir ../README.md
+#
+#   « Internet » (fourni, configuré par le lab)        Votre région « Europe » (VPC 10.0.0.0/16)
+#   ─────────────────────────────────────────────       ──────────────────────────────────────────
+#   Lomé 192.0.2.0/24 : client, console, dns-racine,    passerelle : Internet ↔ VPC (routage, NAT,
+#                       edge (votre nœud CDN)                        pare-feu, résolveur, VPN)
+#   backbone : relie Lomé et l'Europe (≈ 120 ms          pub  10.0.1.0/24 : lb, ns1
+#              aller-retour : un câble sous-marin)        baie (commutateur « trunk ») : app1, app2,
+#   Europe 203.0.113.0/24 : passerelle                          db, stockage — VLAN 20 et 30 à créer
+#
+# Les adresses Docker ci-dessous sont celles que le « fournisseur » attribue (comme les IP
+# privées d'une instance cloud). Tout le reste — VLAN, routes, NAT, pare-feu, services — est à vous.
+name: marche-cloud
+
+# L'image est construite UNE fois (par « backbone ») ; les autres machines l'utilisent. (Un bloc
+# « build » sur chaque service la reconstruisait une fois par machine — et une image qui change
+# d'identifiant fait recréer les conteneurs, données comprises.)
+x-machine: &machine
+  image: marche-net/ubuntu:24.04
+  pull_policy: never
+  privileged: true            # systemd, pare-feu, VLAN, WireGuard, tc dans un conteneur
+  cgroup: host
+  tmpfs: [/run, /run/lock]
+  restart: unless-stopped
+  stop_grace_period: 20s
+
+x-cgroup: &cgroup /sys/fs/cgroup:/sys/fs/cgroup:rw
+
+services:
+  # ============================ L'« Internet » du lab (fourni) ============================
+  backbone:
+    <<: *machine
+    build:
+      context: ../..
+      dockerfile: lab/docker/Dockerfile
+    hostname: backbone
+    container_name: backbone
+    volumes: [*cgroup, ./internet/backbone:/lab:ro]
+    networks:
+      sortie: { driver_opts: { com.docker.network.endpoint.ifname: sortie } }
+      lome:   { ipv4_address: 192.0.2.1,   driver_opts: { com.docker.network.endpoint.ifname: lome } }
+      europe: { ipv4_address: 203.0.113.1, driver_opts: { com.docker.network.endpoint.ifname: europe } }
+    profiles: [p1, p2, p3]
+
+  dns-racine:
+    <<: *machine
+    hostname: dns-racine
+    container_name: dns-racine
+    volumes: [*cgroup, ./internet/dns-racine:/lab:ro, registre:/var/lib/registre]
+    networks:
+      lome: { ipv4_address: 192.0.2.53, driver_opts: { com.docker.network.endpoint.ifname: internet } }
+    profiles: [p1, p2, p3]
+
+  client:
+    <<: *machine
+    hostname: client
+    container_name: client
+    volumes: [*cgroup, ./internet/poste:/lab:ro]
+    networks:
+      lome: { ipv4_address: 192.0.2.50, driver_opts: { com.docker.network.endpoint.ifname: internet } }
+    profiles: [p1, p2, p3]
+
+  console:
+    <<: *machine
+    hostname: console
+    container_name: console
+    # /var/run/docker.sock : l'« API du fournisseur » — Terraform y crée vos machines à partir du Palier 2
+    # /root (PKI, clés SSH, projets Terraform) et /etc/wireguard survivent à la recréation de la console
+    volumes: [*cgroup, ./internet/poste:/lab:ro, ../../rendu:/srv/rendu, ../..:/srv/projet, /var/run/docker.sock:/var/run/docker.sock,
+              console-root:/root, console-wg:/etc/wireguard]
+    networks:
+      lome: { ipv4_address: 192.0.2.60, driver_opts: { com.docker.network.endpoint.ifname: internet } }
+    profiles: [p1, p2, p3]
+
+  # Le service S3 managé du fournisseur (Paliers 2 et 3) : hors de vos VPC, il garde ce qui doit
+  # survivre à vos machines — l'état Terraform, les sauvegardes hors région.
+  s3:
+    <<: *machine
+    hostname: s3
+    container_name: s3
+    volumes: [*cgroup, ./internet/s3:/lab:ro, s3-donnees:/var/lib/s3, s3-compte:/etc/s3]
+    networks:
+      europe: { ipv4_address: 203.0.113.30, driver_opts: { com.docker.network.endpoint.ifname: internet } }
+    profiles: [p2, p3]
+
+  # ============ Palier 3 : l'Internet devient un ensemble de réseaux autonomes (BGP) ============
+  #   transit-a = la dorsale (TransAtlantique, AS 65010) ; transit-b : OuestNet (AS 65020), un second
+  #   transitaire ; rs-ixp : le serveur de routes de TGIX, l'IXP de Lomé ; fai-lome : TogoNet (AS 65030),
+  #   le FAI des clients de Lomé ; circuit : le circuit dédié Lomé ↔ Europe, loué à un opérateur.
+  transit-b:
+    <<: *machine
+    hostname: transit-b
+    container_name: transit-b
+    volumes: [*cgroup, ./internet/transit-b:/lab:ro]
+    networks:
+      interco:  { ipv4_address: 198.18.0.2, driver_opts: { com.docker.network.endpoint.ifname: interco } }
+      europe-b: { ipv4_address: 198.18.2.1, driver_opts: { com.docker.network.endpoint.ifname: europe-b } }
+      lome-b:   { ipv4_address: 198.18.3.1, driver_opts: { com.docker.network.endpoint.ifname: lome-b } }
+    profiles: [p3]
+
+  rs-ixp:
+    <<: *machine
+    hostname: rs-ixp
+    container_name: rs-ixp
+    volumes: [*cgroup, ./internet/rs-ixp:/lab:ro]
+    networks:
+      ixp: { ipv4_address: 198.18.1.254, driver_opts: { com.docker.network.endpoint.ifname: ixp } }
+    profiles: [p3]
+
+  fai-lome:
+    <<: *machine
+    hostname: fai-lome
+    container_name: fai-lome
+    volumes: [*cgroup, ./internet/fai-lome:/lab:ro]
+    networks:
+      lome:    { ipv4_address: 192.0.2.2,    driver_opts: { com.docker.network.endpoint.ifname: lome } }
+      ixp:     { ipv4_address: 198.18.1.30,  driver_opts: { com.docker.network.endpoint.ifname: ixp } }
+      togonet: { ipv4_address: 198.18.30.1,  driver_opts: { com.docker.network.endpoint.ifname: togonet } }
+    profiles: [p3]
+
+  circuit:
+    <<: *machine
+    hostname: circuit
+    container_name: circuit
+    volumes: [*cgroup, ./internet/circuit:/lab:ro]
+    networks:
+      fibre-europe: { ipv4_address: 198.18.9.1, driver_opts: { com.docker.network.endpoint.ifname: fibre-europe } }
+      fibre-lome:   { ipv4_address: 198.18.9.9, driver_opts: { com.docker.network.endpoint.ifname: fibre-lome } }
+    profiles: [p3]
+
+  # ===================== Vos machines (vierges : tout est à configurer) =====================
+  edge:
+    <<: *machine
+    hostname: edge
+    container_name: edge
+    volumes: [*cgroup]
+    networks:
+      lome: { ipv4_address: 192.0.2.80, driver_opts: { com.docker.network.endpoint.ifname: internet } }
+    profiles: [p1]
+
+  passerelle:
+    <<: *machine
+    hostname: passerelle
+    container_name: passerelle
+    volumes: [*cgroup]
+    networks:
+      europe: { ipv4_address: 203.0.113.10,  driver_opts: { com.docker.network.endpoint.ifname: internet } }
+      pub:    { ipv4_address: 10.0.1.1,      driver_opts: { com.docker.network.endpoint.ifname: pub } }
+      baie:   { ipv4_address: 172.31.255.1,  driver_opts: { com.docker.network.endpoint.ifname: baie } }
+    profiles: [p1]
+
+  lb:
+    <<: *machine
+    hostname: lb
+    container_name: lb
+    volumes: [*cgroup]
+    networks:
+      pub: { ipv4_address: 10.0.1.10, driver_opts: { com.docker.network.endpoint.ifname: pub } }
+    profiles: [p1]
+
+  ns1:
+    <<: *machine
+    hostname: ns1
+    container_name: ns1
+    volumes: [*cgroup]
+    networks:
+      pub: { ipv4_address: 10.0.1.53, driver_opts: { com.docker.network.endpoint.ifname: pub } }
+    profiles: [p1]
+
+  app1:
+    <<: *machine
+    hostname: app1
+    container_name: app1
+    volumes: [*cgroup]
+    networks:
+      baie: { ipv4_address: 172.31.255.21, driver_opts: { com.docker.network.endpoint.ifname: baie } }
+    profiles: [p1]
+
+  app2:
+    <<: *machine
+    hostname: app2
+    container_name: app2
+    volumes: [*cgroup]
+    networks:
+      baie: { ipv4_address: 172.31.255.22, driver_opts: { com.docker.network.endpoint.ifname: baie } }
+    profiles: [p1]
+
+  db:
+    <<: *machine
+    hostname: db
+    container_name: db
+    volumes: [*cgroup]
+    networks:
+      baie: { ipv4_address: 172.31.255.31, driver_opts: { com.docker.network.endpoint.ifname: baie } }
+    profiles: [p1]
+
+  stockage:
+    <<: *machine
+    hostname: stockage
+    container_name: stockage
+    volumes: [*cgroup]
+    networks:
+      baie: { ipv4_address: 172.31.255.41, driver_opts: { com.docker.network.endpoint.ifname: baie } }
+    profiles: [p1]
+
+# Seul lien vers le vrai Internet : « sortie », pour la dorsale du lab (NAT). Tous les autres
+# réseaux sont des commutateurs isolés : macvlan « internal », sans passerelle ni route Docker.
+# (Pas des réseaux « bridge » internes : Docker y jette, dans sa VM, tout paquet dont la destination
+#  sort du sous-réseau — donc tout trafic ROUTÉ par l'une de vos machines. Vérifié.)
+x-commutateur: &commutateur
+  driver: macvlan
+  internal: true
+
+networks:
+  sortie:
+    ipam: { config: [{ subnet: 172.30.0.0/24 }] }
+  lome:
+    <<: *commutateur
+    ipam: { config: [{ subnet: 192.0.2.0/24, gateway: 192.0.2.254 }] }
+  europe:
+    <<: *commutateur
+    ipam: { config: [{ subnet: 203.0.113.0/24, gateway: 203.0.113.254 }] }
+  pub:
+    <<: *commutateur
+    ipam: { config: [{ subnet: 10.0.1.0/24, gateway: 10.0.1.254 }] }
+  baie:
+    <<: *commutateur
+    ipam: { config: [{ subnet: 172.31.255.0/24, gateway: 172.31.255.254 }] }
+  # Palier 3 (198.18.0.0/15 : la plage réservée aux bancs d'essai réseau, RFC 2544)
+  interco:        # le lien de peering entre les deux transitaires, en Europe
+    <<: *commutateur
+    ipam: { config: [{ subnet: 198.18.0.0/29, gateway: 198.18.0.6 }] }
+  ixp:            # TGIX, le point d'échange de Lomé
+    <<: *commutateur
+    ipam: { config: [{ subnet: 198.18.1.0/24, gateway: 198.18.1.250 }] }
+  europe-b:       # les clients d'OuestNet en Europe
+    <<: *commutateur
+    ipam: { config: [{ subnet: 198.18.2.0/24, gateway: 198.18.2.254 }] }
+  lome-b:         # les clients d'OuestNet à Lomé
+    <<: *commutateur
+    ipam: { config: [{ subnet: 198.18.3.0/24, gateway: 198.18.3.254 }] }
+  fibre-europe:   # le circuit dédié, côté Europe
+    <<: *commutateur
+    ipam: { config: [{ subnet: 198.18.9.0/29, gateway: 198.18.9.6 }] }
+  fibre-lome:     # le circuit dédié, côté Lomé
+    <<: *commutateur
+    ipam: { config: [{ subnet: 198.18.9.8/29, gateway: 198.18.9.14 }] }
+  togonet:        # les abonnés de TogoNet
+    <<: *commutateur
+    ipam: { config: [{ subnet: 198.18.30.0/24, gateway: 198.18.30.254 }] }
+
+volumes:
+  console-root:
+  console-wg:
+  s3-donnees:
+  s3-compte:
+  registre:

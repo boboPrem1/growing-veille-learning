@@ -1,0 +1,30 @@
+#!/bin/bash
+# marche-restauration [-t] [instantané]
+#   Restaure la base depuis le dépôt restic (défaut : le dernier instantané).
+#   -t : restauration de TEST dans marche_test, comptage, puis suppression.
+set -Eeuo pipefail
+trap 'echo "ÉCHEC ligne $LINENO (code $?) : $BASH_COMMAND" >&2' ERR
+set -a; . /etc/restic/marche.env; set +a
+
+base=marche
+if [ "${1:-}" = -t ]; then base=marche_test; shift; fi
+instantane=${1:-latest}
+
+t=$(mktemp -d)
+trap 'rm -rf "$t"' EXIT
+restic restore "$instantane" --tag marche --target "$t" --quiet
+f=$(find "$t" -name marche.dump -print -quit)
+[ -s "$f" ] || { echo "Aucun dump dans l'instantané $instantane" >&2; exit 1; }
+
+if [ "$base" = marche ]; then
+    echo "⚠ Restauration de la base de PRODUCTION « marche » depuis $instantane"
+fi
+runuser -u postgres -- dropdb --if-exists --force "$base"     # --force : coupe les connexions (PG ≥ 13)
+runuser -u postgres -- createdb -O marche "$base"
+# Le fichier est lu par CE shell (root) et passé sur l'entrée standard : postgres n'a pas
+# besoin de droits sur le dossier temporaire.
+runuser -u postgres -- pg_restore --no-owner --role=marche -d "$base" < "$f"
+
+n=$(runuser -u postgres -- psql -tAc 'select count(*) from orders' "$base")
+echo "Restauration $instantane → $base : $n commandes"
+if [ "$base" = marche_test ]; then runuser -u postgres -- dropdb "$base"; fi

@@ -1,0 +1,205 @@
+#!/bin/bash
+# marchectl — exploitation de Marché sur ce serveur.
+#
+#   marchectl status                       version en service, versions disponibles, santé
+#   marchectl deploy [-f] <archive.tar.gz> installer une version ; retour arrière AUTOMATIQUE si elle est malade
+#   marchectl rollback                     revenir à la version précédente
+#   marchectl backup                       sauvegarde immédiate (via le service systemd)
+#   marchectl restore [-t] <dump.sql.gz>   restaurer la base ; -t : restauration de TEST dans marche_test
+#
+# Codes de sortie : 0 succès, 1 erreur, 2 usage, 3 opération déjà en cours, 4 déploiement annulé (retour arrière)
+# -E : le piège ERR est hérité par les fonctions (sans lui, une erreur DANS une fonction
+#      n'est pas journalisée — et ici presque tout est dans des fonctions)
+set -Eeuo pipefail
+
+readonly BASE=/opt/marche
+readonly RELEASES=$BASE/releases
+readonly COURANTE=$BASE/current
+readonly PRECEDENTE=$BASE/.precedente
+readonly LOG=/var/log/marche/marchectl.log
+readonly GARDER=3
+readonly SERVICES=(marche@gateway marche@orders marche@payments)
+# Contrôle de santé À TRAVERS nginx. Surchargeable dans /etc/marche/marchectl.conf (root, 600) :
+# au Palier 3, nginx sert en HTTP derrière les répartiteurs (URL_SANTE=http://…, CA=).
+URL_SANTE=https://127.0.0.1/api/products
+CA=/etc/ssl/certs/marche.crt
+# shellcheck source=/dev/null
+[ -r /etc/marche/marchectl.conf ] && . /etc/marche/marchectl.conf
+readonly URL_SANTE CA
+
+journaliser() { printf '%s [%s] %s\n' "$(date '+%F %T')" "${SUDO_USER:-$(id -un)}" "$*" | tee -a "$LOG"; }
+erreur()      { journaliser "ERREUR : $*"; exit 1; }
+usage()       { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+trap 'journaliser "ÉCHEC inattendu ligne $LINENO (code $?) : $BASH_COMMAND"' ERR
+
+[ "$(id -u)" -eq 0 ] || { echo "marchectl doit être lancé en root (sudo)." >&2; exit 1; }
+
+# Une seule opération à la fois : deux déploiements simultanés corrompraient le lien « current »
+verrouiller() {
+    exec 9>/run/marchectl.lock
+    flock -n 9 || { echo "Une autre opération marchectl est en cours." >&2; exit 3; }
+}
+
+version_courante() { [ -L "$COURANTE" ] && basename "$(readlink -f "$COURANTE")" || echo "aucune"; }
+
+# Santé : les 3 /healthz et la page produits À TRAVERS nginx, avec quelques secondes de patience
+en_bonne_sante() {
+    local port
+    for _ in $(seq 1 20); do
+        local ok=1
+        for port in 8000 8001 8002; do
+            curl -fsS -m 3 -o /dev/null "http://127.0.0.1:$port/healthz" 2>/dev/null || ok=0
+        done
+        curl -fsS -m 3 -o /dev/null ${CA:+--cacert "$CA"} "$URL_SANTE" 2>/dev/null || ok=0
+        [ "$ok" -eq 1 ] && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# Bascule ATOMIQUE du lien : on crée un lien temporaire, puis rename(2) remplace l'ancien en une opération
+basculer_vers() {
+    local cible=$1
+    ln -sfn "$cible" "$COURANTE.nouveau"
+    mv -T "$COURANTE.nouveau" "$COURANTE"
+    systemctl restart marche.target
+}
+
+cmd_status() {
+    echo "Version en service : $(version_courante)"
+    [ -f "$PRECEDENTE" ] && echo "Version précédente : $(basename "$(cat "$PRECEDENTE")")"
+    echo "Versions installées :"; ls -1t "$RELEASES" 2>/dev/null | sed 's/^/  /'
+    local s; for s in "${SERVICES[@]}" marche-loadgen; do printf '  %-18s %s\n' "$s" "$(systemctl is-active "$s")"; done
+    if en_bonne_sante; then echo "Santé : OK"; else echo "Santé : KO"; exit 1; fi
+}
+
+cmd_deploy() {
+    local force=0 opt
+    OPTIND=1
+    while getopts "f" opt; do case $opt in f) force=1 ;; *) usage ;; esac; done
+    shift $((OPTIND - 1))
+    local archive=${1:-}
+    [ -n "$archive" ] && [ -f "$archive" ] || erreur "archive introuvable : ${archive:-<aucune>}"
+    verrouiller
+
+    # 1. Intégrité : l'empreinte doit correspondre, si elle est fournie
+    if [ -f "$archive.sha256" ]; then
+        (cd "$(dirname "$archive")" && sha256sum -c --quiet "$(basename "$archive").sha256") \
+            || erreur "empreinte SHA-256 invalide pour $archive"
+    else
+        journaliser "AVERTISSEMENT : pas de fichier .sha256, intégrité non vérifiée"
+    fi
+
+    # 2. Inspection AVANT extraction : un seul dossier racine marche-X.Y.Z/, aucun chemin suspect
+    # On lit la liste UNE fois, dans une variable. Surtout pas « tar -tzf | head -1 » ni
+    # « tar -tzf | grep -q » : avec pipefail, head/grep -q qui s'arrêtent tôt tuent tar par
+    # SIGPIPE (code 141) — le script échoue au hasard, et pire, « grep -q '\.\./' » peut
+    # rendre FAUX précisément quand il a trouvé un chemin dangereux.
+    local liste racine version
+    liste=$(tar -tzf "$archive") || erreur "archive illisible : $archive"
+    racine=${liste%%$'\n'*}; racine=${racine%%/*}
+    [[ $racine =~ ^marche-([0-9]+\.[0-9]+\.[0-9]+)$ ]] || erreur "archive inattendue (racine : $racine)"
+    version=${BASH_REMATCH[1]}
+    if grep -Evq "^$racine(/|$)" <<< "$liste" || grep -q '\.\./' <<< "$liste"; then
+        erreur "archive refusée : chemins hors de $racine/"
+    fi
+    local dest=$RELEASES/$version
+    if [ -e "$dest" ]; then
+        [ "$force" -eq 1 ] || erreur "la version $version est déjà installée (-f pour la réinstaller)"
+        [ "$(readlink -f "$COURANTE")" != "$dest" ] || erreur "impossible de réinstaller la version en service"
+        rm -rf "$dest"
+    fi
+
+    # 3. Préparer la version à côté de la version en service (qui continue de tourner)
+    journaliser "DÉPLOIEMENT $version : préparation"
+    local tmp=$RELEASES/.tmp-$version
+    rm -rf "$tmp" && mkdir -p "$tmp"
+    tar -xzf "$archive" -C "$tmp" --strip-components=1 --no-same-owner
+    python3 -m venv "$tmp/venv"
+    "$tmp/venv/bin/pip" install -q --disable-pip-version-check -r "$tmp/requirements.txt"
+    chown -R root:root "$tmp" && chmod -R u=rwX,go=rX "$tmp"
+    mv -T "$tmp" "$dest"
+
+    # 4. Bascule, puis contrôle de santé ; en cas d'échec, retour arrière automatique
+    local ancienne; ancienne=$(readlink -f "$COURANTE" 2>/dev/null || true)
+    basculer_vers "$dest"
+    if en_bonne_sante; then
+        [ -n "$ancienne" ] && [ "$ancienne" != "$dest" ] && echo "$ancienne" > "$PRECEDENTE"
+        journaliser "DÉPLOIEMENT $version : SUCCÈS"
+        purger
+    else
+        journaliser "DÉPLOIEMENT $version : ÉCHEC du contrôle de santé → retour à $(basename "${ancienne:-aucune}")"
+        [ -n "$ancienne" ] || erreur "aucune version précédente vers laquelle revenir"
+        basculer_vers "$ancienne"
+        en_bonne_sante && journaliser "RETOUR ARRIÈRE : $(basename "$ancienne") en service" \
+                       || journaliser "RETOUR ARRIÈRE : la version précédente est AUSSI en échec, intervention requise"
+        exit 4
+    fi
+}
+
+cmd_rollback() {
+    verrouiller
+    [ -f "$PRECEDENTE" ] && [ -d "$(cat "$PRECEDENTE")" ] || erreur "aucune version précédente connue"
+    local cible actuelle
+    cible=$(cat "$PRECEDENTE"); actuelle=$(readlink -f "$COURANTE")
+    journaliser "RETOUR ARRIÈRE demandé : $(basename "$actuelle") → $(basename "$cible")"
+    basculer_vers "$cible"
+    echo "$actuelle" > "$PRECEDENTE"
+    en_bonne_sante && journaliser "RETOUR ARRIÈRE : SUCCÈS" || erreur "services en échec après retour arrière"
+}
+
+# Garder les $GARDER versions les plus récentes, jamais la courante ni la précédente
+purger() {
+    local garder_c garder_p r
+    garder_c=$(readlink -f "$COURANTE"); garder_p=$(cat "$PRECEDENTE" 2>/dev/null || true)
+    ls -1dt "$RELEASES"/*/ 2>/dev/null | sed 's#/$##' | tail -n +$((GARDER + 1)) | while read -r r; do
+        [[ $r == "$garder_c" || $r == "$garder_p" ]] && continue
+        rm -rf "$r" && journaliser "PURGE de l'ancienne version $(basename "$r")"
+    done
+}
+
+cmd_backup() {
+    systemctl start marche-backup.service     # oneshot : la commande attend la fin
+    journaliser "SAUVEGARDE manuelle : $(systemctl show -p Result --value marche-backup.service)"
+    tail -n 2 /var/log/marche/backup.log
+}
+
+cmd_restore() {
+    local test=0 opt
+    OPTIND=1
+    while getopts "t" opt; do case $opt in t) test=1 ;; *) usage ;; esac; done
+    shift $((OPTIND - 1))
+    local dump=${1:-}
+    [ -f "$dump" ] || erreur "sauvegarde introuvable : ${dump:-<aucune>}"
+    gzip -t "$dump" || erreur "archive corrompue : $dump"
+    verrouiller
+    local base=marche
+    if [ "$test" -eq 1 ]; then
+        base=marche_test
+    else
+        read -r -p "Remplacer la base de PRODUCTION « marche » par $dump ? Tapez « oui » : " rep
+        [ "$rep" = oui ] || erreur "restauration annulée"
+        systemctl stop marche@orders
+    fi
+    runuser -u postgres -- dropdb --if-exists "$base"
+    runuser -u postgres -- createdb -O marche "$base"
+    zcat "$dump" | runuser -u postgres -- psql -q -v ON_ERROR_STOP=1 "$base" >/dev/null
+    local n; n=$(runuser -u postgres -- psql -tAc "select count(*) from orders" "$base")
+    journaliser "RESTAURATION ($base) depuis $(basename "$dump") : $n commandes"
+    if [ "$test" -eq 1 ]; then
+        runuser -u postgres -- dropdb "$base"
+        echo "✔ Test de restauration réussi : $n commandes (base de test supprimée)"
+    else
+        systemctl start marche@orders
+    fi
+}
+
+commande=${1:-}; shift || true
+case "$commande" in
+    status)   cmd_status ;;
+    deploy)   cmd_deploy "$@" ;;
+    rollback) cmd_rollback ;;
+    backup)   cmd_backup ;;
+    restore)  cmd_restore "$@" ;;
+    *)        usage ;;
+esac

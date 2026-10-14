@@ -1,0 +1,17 @@
+---
+# Première installation : aucune version n'est encore déployée (pas de lien current),
+# il n'y a rien à redémarrer — le déploiement démarrera les services.
+- name: Redémarrer Marché
+  ansible.builtin.shell: |
+    systemctl daemon-reload
+    if [ -L /opt/marche/current ]; then systemctl restart marche.target; fi
+
+- name: Tester et recharger nginx
+  ansible.builtin.command: nginx -t
+  changed_when: true
+  notify: Recharger nginx
+
+- name: Recharger nginx
+  ansible.builtin.systemd_service:
+    name: nginx
+    state: reloaded

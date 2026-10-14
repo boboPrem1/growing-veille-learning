@@ -1,0 +1,25 @@
+---
+- name: keepalived (et curl, pour son script de contrôle)
+  ansible.builtin.apt:
+    name: [keepalived, curl]
+    state: present
+
+- name: Utilisateur dédié aux scripts de contrôle (keepalived refuse de les lancer en root sans raison)
+  ansible.builtin.user:
+    name: keepalived_script
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+
+- name: Configuration VRRP
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    mode: "0640"
+  notify: Recharger keepalived
+
+- name: keepalived démarré
+  ansible.builtin.systemd_service:
+    name: keepalived
+    state: started
+    enabled: true

@@ -1,0 +1,11 @@
+---
+# Coffre Ansible. Laissé EN CLAIR ici, dans la solution de référence, pour pouvoir être lu.
+# Dans VOTRE projet, il est chiffré — le correcteur le vérifie :
+#     ansible-vault encrypt group_vars/all/vault.yml
+# (sans --vault-password-file : ansible.cfg le déclare déjà ; les deux ensemble = erreur)
+# Secrets du LAB — ne jamais réutiliser ailleurs.
+vault_admin_mdp: "snICvlGcFyCpjA7Sz0BGI5YG"
+vault_admin_sel: "rfkMt78fXDfKnCz"
+vault_db_mdp: "sPz47iKXfvcYzZSo2cDTd6"
+vault_restic_mdp: "K7x9KDM22AWID9bgwKtQHIX4"
+vault_vrrp_mdp: "oPqqtw5w"

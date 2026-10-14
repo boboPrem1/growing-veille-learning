@@ -1,0 +1,13 @@
+[Unit]
+Description=Noms d'interface parlants (d'après /etc/lab/interfaces)
+DefaultDependencies=no
+Before=network-pre.target systemd-networkd.service
+Wants=network-pre.target
+ConditionPathExists=/etc/lab/interfaces
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/lab-interfaces
+
+[Install]
+WantedBy=multi-user.target

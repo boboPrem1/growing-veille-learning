@@ -1,0 +1,10 @@
+# /etc/systemd/system/marche.target — « Marché » comme un tout :
+#   systemctl restart marche.target   redémarre les 4 services
+#   systemctl stop marche.target      les arrête tous (PartOf= dans chaque unité)
+[Unit]
+Description=Marché — tous les services
+Wants=marche@gateway.service marche@orders.service marche@payments.service marche-loadgen.service
+After=marche@gateway.service marche@orders.service marche@payments.service
+
+[Install]
+WantedBy=multi-user.target

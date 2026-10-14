@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: marche
+    type: file
+    disableDeletion: true        # supprimer le JSON du dépôt = seul moyen de supprimer le dashboard
+    allowUiUpdates: false        # Git est la source de vérité : pas de modification « en douce » dans l'UI
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: true   # un sous-dossier = un dossier Grafana

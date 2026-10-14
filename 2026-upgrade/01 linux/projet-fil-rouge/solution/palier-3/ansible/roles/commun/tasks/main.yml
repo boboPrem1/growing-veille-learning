@@ -1,0 +1,115 @@
+---
+- name: Paquets de base
+  ansible.builtin.apt:
+    name: [acl, curl, fail2ban, nftables, unattended-upgrades, python3-apt, rsync]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Fuseau horaire
+  community.general.timezone:
+    name: "{{ fuseau }}"
+
+# /etc/hosts : dans un conteneur Docker, c'est un montage (bind mount) : impossible de le
+# remplacer par renommage, d'où unsafe_writes (écriture en place). Sans effet ailleurs.
+- name: Les machines du lab se connaissent par leur nom
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} MARCHÉ (Ansible)"
+    unsafe_writes: true
+    block: |
+      {% for h in groups['all'] | sort %}
+      {{ hostvars[h]['ansible_host'] }} {{ h }}
+      {% endfor %}
+      {{ vip }} marche-vip
+
+- name: Groupe des comptes autorisés en SSH
+  ansible.builtin.group:
+    name: ssh-autorises
+
+- name: Le compte d'automatisation (ubuntu) reste autorisé — sinon Ansible s'enferme dehors
+  ansible.builtin.user:
+    name: ubuntu
+    groups: ssh-autorises
+    append: true
+
+- name: Compte d'administration personnel
+  ansible.builtin.user:
+    name: "{{ admin_utilisateur }}"
+    shell: /bin/bash
+    groups: [sudo, ssh-autorises]
+    append: true
+    password: "{{ admin_mdp_hache }}"
+
+- name: Clé SSH de l'administrateur
+  ansible.posix.authorized_key:
+    user: "{{ admin_utilisateur }}"
+    key: "{{ admin_cle_publique }}"
+    exclusive: true
+
+- name: "Durcissement SSH (fichier en « 10- » : la première valeur lue gagne)"
+  ansible.builtin.template:
+    src: sshd-marche.conf.j2
+    dest: /etc/ssh/sshd_config.d/10-marche.conf
+    mode: "0644"
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Recharger ssh
+
+- name: fail2ban (SSH), sans jamais bannir l'administration
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.local
+    mode: "0644"
+    content: |
+      # Géré par Ansible
+      [DEFAULT]
+      banaction = nftables-multiport
+      ignoreip = 127.0.0.1/8 ::1 {{ reseau_admin | join(' ') }} {{ groups['all'] | map('extract', hostvars, 'ansible_host') | join(' ') }}
+      [sshd]
+      enabled = true
+  notify: Redémarrer fail2ban
+
+- name: Dossier des réglages journald (absent d'une Ubuntu neuve)
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    mode: "0755"
+
+- name: journald limité
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/marche.conf
+    mode: "0644"
+    content: |
+      [Journal]
+      SystemMaxUse=200M
+  notify: Redémarrer journald
+
+# Réglages réseau du noyau propres à l'espace de noms réseau : sans effet sur l'hôte, même en
+# conteneur. (Ne JAMAIS pousser de kernel.* depuis un conteneur privilégié : c'est le noyau
+# de l'hôte qui serait modifié.)
+- name: Durcissement réseau (sysctl)
+  ansible.posix.sysctl:
+    name: "{{ item.cle }}"
+    value: "{{ item.valeur }}"
+    sysctl_file: /etc/sysctl.d/60-marche.conf
+    reload: true
+  loop:
+    - { cle: net.ipv4.conf.all.accept_redirects, valeur: 0 }
+    - { cle: net.ipv4.conf.all.send_redirects, valeur: 0 }
+    - { cle: net.ipv4.conf.all.accept_source_route, valeur: 0 }
+    - { cle: net.ipv4.conf.all.log_martians, valeur: 1 }
+    - { cle: net.ipv4.tcp_syncookies, valeur: 1 }
+
+- name: Mises à jour de sécurité automatiques
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+- name: Services de base actifs
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop: [fail2ban, unattended-upgrades]

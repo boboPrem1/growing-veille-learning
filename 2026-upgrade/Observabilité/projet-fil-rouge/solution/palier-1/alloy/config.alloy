@@ -1,0 +1,46 @@
+// Grafana Alloy — collecte des logs des conteneurs Docker vers Loki.
+// Interface de débogage : http://localhost:12345 (graphe des composants, état, erreurs)
+
+// 1. Découvrir les conteneurs via l'API Docker — uniquement ceux du projet compose « marche ».
+//    Filtrer ICI (et pas avec une règle « keep » plus bas) : loki.source.docker suit toutes
+//    les cibles découvertes, même celles dont les règles de relabel suppriment les labels.
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+  filter {
+    name   = "label"
+    values = ["com.docker.compose.project=marche"]
+  }
+}
+
+// 2. Transformer les métadonnées Docker en labels Loki (peu nombreux, peu variables)
+discovery.relabel "containers" {
+  targets = []
+
+  // service = nom du service compose (gateway, orders, prometheus…)
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+  // container = nom du conteneur, sans le « / » initial
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+// 3. Lire les logs de ces conteneurs
+loki.source.docker "containers" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.containers.targets
+  relabel_rules = discovery.relabel.containers.rules
+  labels        = { job = "docker" }
+  forward_to    = [loki.write.local.receiver]
+}
+
+// 4. Envoyer à Loki
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

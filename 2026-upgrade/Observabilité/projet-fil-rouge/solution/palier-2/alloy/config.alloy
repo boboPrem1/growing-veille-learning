@@ -1,0 +1,65 @@
+// Grafana Alloy — Palier 2 : collecte + traitement des logs avant envoi à Loki.
+// Interface de débogage : http://localhost:12345
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+  filter {
+    name   = "label"
+    values = ["com.docker.compose.project=marche"]
+  }
+}
+
+discovery.relabel "containers" {
+  targets = []
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "containers" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.containers.targets
+  relabel_rules = discovery.relabel.containers.rules
+  labels        = { job = "docker" }
+  forward_to    = [loki.process.marche.receiver]
+}
+
+// Pipeline de traitement : ne s'applique qu'aux services applicatifs (logs JSON)
+loki.process "marche" {
+  forward_to = [loki.write.local.receiver]
+
+  stage.match {
+    selector = "{service=~\"gateway|orders|payments\"}"
+
+    // 1. Extraire quelques champs du JSON
+    stage.json {
+      expressions = { level = "", route = "" }
+    }
+
+    // 2. Jeter les logs d'accès des health checks (le blackbox les appelle toutes les 15 s)
+    stage.drop {
+      source              = "route"
+      value               = "/healthz"
+      drop_counter_reason = "healthcheck"
+    }
+
+    // 3. Promouvoir `level` en label : 4 valeurs possibles seulement, donc sans risque
+    //    de cardinalité. JAMAIS order_id, route brute, user_id… en label !
+    stage.labels {
+      values = { level = "" }
+    }
+  }
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

@@ -1,0 +1,50 @@
+# Géré par Ansible (rôle keepalived) — {{ inventory_hostname }}, priorité {{ keepalived_priorite }}
+global_defs {
+    router_id {{ inventory_hostname }}
+    script_user keepalived_script
+    enable_script_security
+}
+
+# HAProxy vivant ET qui répond ? Sinon, cette machine cède l'IP virtuelle.
+vrrp_script haproxy_vivant {
+    # Pas « pidof » : sur Ubuntu 24.04 c'est un lien vers killall5, et keepalived (enable_script_security)
+    # lance la cible du lien, qui échoue toujours → les deux répartiteurs en FAULT, plus de VIP.
+    # Et un HAProxy vivant mais bloqué doit aussi céder l'IP : on lui pose une question.
+    script "/usr/bin/curl -sf -o /dev/null -m 1 http://127.0.0.1:8404/"
+    # Chaque seconde, et cède l'IP au premier échec : mesuré dans le lab, 1 à 2 requêtes perdues
+    # sur 60 pendant la bascule (13 avec interval 2 / fall 2). rise 2 évite de la reprendre trop tôt.
+    # (vrrp_track_process réagirait instantanément, mais ne fonctionne pas en conteneur :
+    # « Failed to set/clear process event listen - errno 111 ».)
+    interval 1
+    fall 1
+    rise 2
+}
+
+vrrp_instance VI_MARCHE {
+    state BACKUP                       # les deux démarrent en BACKUP : la priorité décide
+    interface {{ ansible_default_ipv4.interface }}
+    virtual_router_id 51
+    priority {{ keepalived_priorite }}
+    advert_int 1
+
+    # Unicast : pas de dépendance au multicast du réseau (souvent filtré chez les hébergeurs)
+    unicast_src_ip {{ ansible_host }}
+    unicast_peer {
+{% for h in groups['lb'] | difference([inventory_hostname]) %}
+        {{ hostvars[h]['ansible_host'] }}
+{% endfor %}
+    }
+
+    authentication {
+        auth_type PASS
+        auth_pass {{ vault_vrrp_mdp[:8] }}    # keepalived ne lit que les 8 premiers caractères
+    }
+
+    virtual_ipaddress {
+        {{ vip }}/24 dev {{ ansible_default_ipv4.interface }}
+    }
+
+    track_script {
+        haproxy_vivant
+    }
+}

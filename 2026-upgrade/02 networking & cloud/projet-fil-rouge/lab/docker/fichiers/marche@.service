@@ -1,0 +1,26 @@
+# Une unité modèle pour les trois services de Marché : marche@gateway, marche@orders, marche@payments
+# Configuration : /etc/marche/marche.env (commune), puis /etc/marche/<service>.env (propre au service).
+[Unit]
+Description=Marché — service %i
+PartOf=marche.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=marche
+Group=marche
+WorkingDirectory=/opt/marche/app
+EnvironmentFile=/etc/marche/marche.env
+EnvironmentFile=-/etc/marche/%i.env
+Environment=SERVICE_NAME=%i
+ExecStart=/opt/marche/venv/bin/python %i.py
+Restart=on-failure
+RestartSec=3
+MemoryMax=300M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/marche
+PrivateTmp=yes
+
+[Install]
+WantedBy=marche.target

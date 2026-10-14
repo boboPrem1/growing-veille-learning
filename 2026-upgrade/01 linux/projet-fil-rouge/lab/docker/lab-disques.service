@@ -1,0 +1,13 @@
+[Unit]
+Description=Lab : rattacher les disques secondaires (images loop)
+DefaultDependencies=no
+Before=local-fs-pre.target
+Wants=local-fs-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/lab-disques
+
+[Install]
+WantedBy=local-fs-pre.target

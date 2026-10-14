@@ -1,0 +1,63 @@
+---
+# Marché en haute disponibilité — l'infrastructure entière, depuis des machines vierges.
+#   ansible-playbook site.yml               tout
+#   ansible-playbook site.yml --limit db1   une machine (plan de reprise)
+#   ansible-playbook site.yml --check --diff    ce qui changerait (dérive de configuration)
+
+- name: Certificat du site, généré une seule fois sur le poste de contrôle
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Dossier de la PKI du lab (hors du dépôt Git)
+      ansible.builtin.file:
+        path: "{{ pki }}"
+        state: directory
+        mode: "0700"
+    - name: Certificat auto-signé de l'IP virtuelle
+      ansible.builtin.command: >-
+        openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj /CN=marche
+        -addext "subjectAltName=IP:{{ vip }},DNS:marche-vip,DNS:localhost"
+        -keyout {{ pki }}/marche-vip.key -out {{ pki }}/marche-vip.crt
+      args:
+        creates: "{{ pki }}/marche-vip.crt"
+
+- name: Socle commun (comptes, SSH, fuseau, mises à jour, pare-feu)
+  hosts: all
+  become: true
+  roles:
+    - commun
+    - parefeu
+
+- name: Tunnel WireGuard db1 ↔ bak1
+  hosts: wireguard
+  become: true
+  roles:
+    - wireguard
+
+- name: Dépôt de sauvegardes (bak1)
+  hosts: bak
+  become: true
+  roles:
+    - depot_sauvegarde
+
+- name: Base de données (db1) et ses sauvegardes chiffrées vers bak1
+  hosts: db
+  become: true
+  roles:
+    - postgresql
+    - sauvegarde
+
+- name: Application (web1, web2) — une machine à la fois
+  hosts: web
+  become: true
+  serial: 1          # déploiement progressif : l'autre serveur web continue de servir
+  roles:
+    - marche
+
+- name: Répartition de charge et IP virtuelle (lb1, lb2)
+  hosts: lb
+  become: true
+  roles:
+    - haproxy
+    - keepalived

@@ -1,0 +1,10 @@
+[Unit]
+Description=Marché — sauvegarde (base + configuration)
+After=postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/marche-backup
+Nice=10
+IOSchedulingClass=idle

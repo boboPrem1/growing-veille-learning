@@ -1,0 +1,139 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    env: lab
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels:
+          host: docker-host
+
+  # ------------------------------------------------------------------------
+  # Service discovery Docker : tout conteneur portant le label
+  # « prometheus.scrape=true » est scrapé, sur le port « prometheus.port ».
+  # Ajouter un service = ajouter 2 labels dans le compose, sans toucher ce fichier.
+  # ------------------------------------------------------------------------
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 15s
+        filters:
+          - name: label
+            values: ["prometheus.scrape=true"]
+    relabel_configs:
+      # Adresse = <nom du conteneur>:<port déclaré> (au lieu de l'IP:port exposé par défaut)
+      - source_labels: [__meta_docker_container_name, __meta_docker_container_label_prometheus_port]
+        regex: /(.+);(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      # Chemin personnalisable via le label « prometheus.path »
+      - source_labels: [__meta_docker_container_label_prometheus_path]
+        regex: (.+)
+        target_label: __metrics_path__
+      # Labels lisibles
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.+)
+        target_label: container
+      # Le label « job » devient le rôle déclaré (app, database…) : plus parlant que « docker »
+      - source_labels: [__meta_docker_container_label_prometheus_job]
+        regex: (.+)
+        target_label: job
+
+  # ------------------------------------------------------------------------
+  # cAdvisor : métriques par conteneur. On jette les métriques qu'on n'utilise pas
+  # (metric_relabel_configs agit APRÈS le scrape, sur chaque série).
+  # ------------------------------------------------------------------------
+  - job_name: cadvisor
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["cadvisor:8080"]
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: container_(tasks_state|memory_failures_total|blkio_device_usage_total|network_(receive|transmit)_(errors|packets_dropped)_total)
+        action: drop
+      # Ne garder que les conteneurs nommés (pas les cgroups système)
+      - source_labels: [name]
+        regex: ""
+        action: drop
+
+  # ------------------------------------------------------------------------
+  # Blackbox : sondes « de l'extérieur ». Pattern multi-cibles à connaître par cœur.
+  # ------------------------------------------------------------------------
+  - job_name: blackbox-http
+    metrics_path: /probe
+    params:
+      module: [http_health]
+    static_configs:
+      - targets:
+          - http://gateway:8000/healthz
+          - http://orders:8001/healthz
+          - http://payments:8002/healthz
+      # Le /api/health de Grafana ne contient pas "status": "ok" : autre module pour
+      # cette cible. Un label __param_<nom> sur la cible surcharge params.<nom> du job.
+      - targets:
+          - http://grafana:3000/api/health
+        labels:
+          __param_module: http_2xx
+    relabel_configs:
+      - source_labels: [__address__]      # la cible réelle devient le paramètre ?target=
+        target_label: __param_target
+      - source_labels: [__param_target]   # …et le label instance, pour s'y retrouver
+        target_label: instance
+      # Label service (gateway, orders…) extrait de l'URL : sans lui, l'inhibition
+      # « sonde en échec → masquer les erreurs du même service » ne peut pas fonctionner
+      - source_labels: [__param_target]
+        regex: https?://([^:/]+).*
+        target_label: service
+      - target_label: __address__         # Prometheus appelle en réalité le blackbox exporter
+        replacement: blackbox-exporter:9115
+
+  - job_name: blackbox-tcp
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    static_configs:
+      - targets: ["postgres:5432"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # Les métriques propres au blackbox exporter (pas les sondes)
+  - job_name: blackbox-exporter
+    static_configs:
+      - targets: ["blackbox-exporter:9115"]
+
+  - job_name: loki
+    static_configs:
+      - targets: ["loki:3100"]
+  - job_name: alloy
+    static_configs:
+      - targets: ["alloy:12345"]
+  - job_name: grafana
+    static_configs:
+      - targets: ["grafana:3000"]

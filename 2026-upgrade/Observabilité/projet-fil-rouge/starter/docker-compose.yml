@@ -1,0 +1,79 @@
+# Marché — application à observer (point de départ du projet fil rouge)
+#
+#   docker compose up -d --build
+#   curl http://localhost:8000/api/products
+#
+# Vous ajouterez VOS services d'observabilité dans ce même fichier, palier après palier.
+
+name: marche
+
+services:
+  postgres:
+    image: postgres:17.11-alpine
+    container_name: marche-postgres
+    environment:
+      POSTGRES_USER: marche
+      POSTGRES_PASSWORD: marche
+      POSTGRES_DB: marche
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marche -d marche"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  gateway:
+    build: ./app
+    container_name: marche-gateway
+    command: ["python", "gateway.py"]
+    environment:
+      SERVICE_NAME: gateway
+      ORDERS_URL: http://orders:8001
+    ports:
+      - "8000:8000"
+    depends_on:
+      - orders
+    restart: unless-stopped
+
+  orders:
+    build: ./app
+    container_name: marche-orders
+    command: ["python", "orders.py"]
+    environment:
+      SERVICE_NAME: orders
+      DATABASE_URL: postgresql://marche:marche@postgres:5432/marche
+      PAYMENTS_URL: http://payments:8002
+    ports:
+      - "127.0.0.1:8001:8001"   # uniquement pour chaos.py
+    depends_on:
+      postgres:
+        condition: service_healthy
+      payments:
+        condition: service_started
+    restart: unless-stopped
+
+  payments:
+    build: ./app
+    container_name: marche-payments
+    command: ["python", "payments.py"]
+    environment:
+      SERVICE_NAME: payments
+    ports:
+      - "127.0.0.1:8002:8002"   # uniquement pour chaos.py
+    restart: unless-stopped
+
+  loadgen:
+    build: ./app
+    container_name: marche-loadgen
+    command: ["python", "loadgen.py"]
+    environment:
+      GATEWAY_URL: http://gateway:8000
+      RPS: "5"
+    depends_on:
+      - gateway
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

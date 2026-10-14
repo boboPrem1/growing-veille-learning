@@ -1,0 +1,62 @@
+# Observability as Code : chaque Pull Request qui touche la stack est validée,
+# chaque merge sur main est déployé. Aucune modification manuelle en production.
+name: Stack d'observabilité
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: observabilite-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  valider:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Créer des secrets factices (compose config les exige)
+        run: |
+          printf '%s' ci > secrets/grafana_admin_password.txt
+          printf '%s' ci > secrets/prometheus_password.txt
+
+      - name: Valider configs, règles, tests unitaires, SLO, dashboards
+        run: ./scripts/validate.sh
+
+  deployer:
+    needs: valider
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: production          # approbation manuelle possible dans les réglages GitHub
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Déployer sur le serveur d'observabilité
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          install -m 600 /dev/null ~/.ssh_key && printf '%s\n' "$SSH_KEY" > ~/.ssh_key
+          rsync -az --delete --exclude secrets/ -e "ssh -i ~/.ssh_key -o StrictHostKeyChecking=accept-new" \
+            ./ deploy@"$HOST":/opt/marche-observabilite/
+          ssh -i ~/.ssh_key deploy@"$HOST" '
+            cd /opt/marche-observabilite &&
+            docker compose pull --quiet &&
+            docker compose up -d --remove-orphans &&
+            for p in prometheus-a prometheus-b; do
+              docker compose exec -T $p sh -c "wget -qO- --post-data= --header=\"Authorization: Basic $(printf admin:%s \"$(cat /run/secrets/prometheus_password)\" | base64)\" http://localhost:9090/-/reload"
+            done'
+
+      - name: Annoter le déploiement dans Grafana
+        env:
+          GRAFANA_TOKEN: ${{ secrets.GRAFANA_CI_TOKEN }}   # jeton du compte de service ci-dashboards
+          GRAFANA_URL: ${{ secrets.GRAFANA_URL }}
+        run: |
+          curl -fsS -X POST "$GRAFANA_URL/api/annotations" \
+            -H "Authorization: Bearer $GRAFANA_TOKEN" -H "Content-Type: application/json" \
+            -d "{\"text\":\"Déploiement stack observabilité ${GITHUB_SHA::7}\",\"tags\":[\"deploy\",\"observabilite\"]}"

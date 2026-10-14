@@ -1,0 +1,52 @@
+# /etc/systemd/system/marche@.service — UNE unité modèle pour les 3 services :
+#   marche@gateway, marche@orders, marche@payments   (%i = ce qui suit le @)
+[Unit]
+Description=Marché — service %i
+PartOf=marche.target
+Wants=postgresql.service
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=marche
+Group=marche
+WorkingDirectory=/opt/marche/current
+EnvironmentFile=/etc/marche/marche.env
+Environment=SERVICE_NAME=%i
+ExecStart=/opt/marche/current/venv/bin/python %i.py
+Restart=on-failure
+RestartSec=3
+
+# --- Ressources (cgroups) ---
+MemoryMax=300M
+TasksMax=64
+LimitNOFILE=4096
+
+# --- Durcissement : que peut faire ce service s'il est compromis ? Presque rien. ---
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ReadWritePaths=/var/lib/marche
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0027
+
+[Install]
+WantedBy=marche.target

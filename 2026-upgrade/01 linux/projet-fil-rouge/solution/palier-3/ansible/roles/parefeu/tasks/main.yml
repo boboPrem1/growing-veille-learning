@@ -1,0 +1,21 @@
+---
+- name: "Un seul outil pilote le pare-feu : ufw arrêté"
+  ansible.builtin.systemd_service:
+    name: ufw
+    state: stopped
+    enabled: false
+  failed_when: false          # ufw peut ne pas être installé
+
+- name: Politique nftables (vérifiée par nft -c AVANT d'être écrite)
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    mode: "0755"
+    validate: /usr/sbin/nft -c -f %s
+  notify: Recharger nftables
+
+- name: nftables actif au démarrage
+  ansible.builtin.systemd_service:
+    name: nftables
+    state: started
+    enabled: true

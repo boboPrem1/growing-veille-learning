@@ -1,0 +1,17 @@
+# Le script de démarrage d'une machine (/lab/init.sh) : fourni par le lab pour les machines de
+# l'Internet, par VOTRE Terraform pour les vôtres (l'équivalent du « user data » / cloud-init).
+# Exécuté à CHAQUE démarrage, APRÈS multi-user.target (comme l'étape « final » de cloud-init) :
+# les services qu'il (re)démarre n'ont plus de tâche de démarrage en attente — pas d'interblocage.
+[Unit]
+Description=Script de démarrage de la machine (/lab/init.sh)
+ConditionPathExists=/lab/init.sh
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /lab/init.sh
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

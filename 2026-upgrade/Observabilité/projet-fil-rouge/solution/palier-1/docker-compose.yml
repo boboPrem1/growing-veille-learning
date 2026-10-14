@@ -1,0 +1,150 @@
+# Solution de référence — Palier 1 : Marché + Prometheus, Node Exporter, Loki, Alloy, Grafana
+#
+#   docker compose up -d --build
+#
+# Grafana : http://localhost:3000 (admin / voir GF_SECURITY_ADMIN_PASSWORD)
+
+name: marche
+
+x-app: &app
+  build: ../../starter/app
+  restart: unless-stopped
+
+services:
+  # ------------------------------------------------------------------ application
+  postgres:
+    image: postgres:17.11-alpine
+    container_name: marche-postgres
+    environment:
+      POSTGRES_USER: marche
+      POSTGRES_PASSWORD: marche
+      POSTGRES_DB: marche
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marche -d marche"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  gateway:
+    <<: *app
+    container_name: marche-gateway
+    command: ["python", "gateway.py"]
+    environment:
+      SERVICE_NAME: gateway
+      ORDERS_URL: http://orders:8001
+    ports:
+      - "8000:8000"
+    depends_on: [orders]
+
+  orders:
+    <<: *app
+    container_name: marche-orders
+    command: ["python", "orders.py"]
+    environment:
+      SERVICE_NAME: orders
+      DATABASE_URL: postgresql://marche:marche@postgres:5432/marche
+      PAYMENTS_URL: http://payments:8002
+    ports:
+      - "127.0.0.1:8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      payments:
+        condition: service_started
+
+  payments:
+    <<: *app
+    container_name: marche-payments
+    command: ["python", "payments.py"]
+    environment:
+      SERVICE_NAME: payments
+    ports:
+      - "127.0.0.1:8002:8002"
+
+  loadgen:
+    <<: *app
+    container_name: marche-loadgen
+    command: ["python", "loadgen.py"]
+    environment:
+      GATEWAY_URL: http://gateway:8000
+      RPS: "5"
+    depends_on: [gateway]
+
+  # ------------------------------------------------------------------ observabilité
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    container_name: prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle          # autorise POST /-/reload
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.12.1
+    container_name: node-exporter
+    command:
+      - --path.rootfs=/host
+    pid: host
+    volumes:
+      # Sur un vrai serveur Linux, préférez « /:/host:ro,rslave » (propagation des montages).
+      # Docker Desktop (Windows/macOS) refuse « rslave » : on s'en passe dans le lab.
+      - /:/host:ro
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.7.8
+    container_name: loki
+    command: -config.file=/etc/loki/loki-config.yaml
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.20.0
+    container_name: alloy
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy/data
+    ports:
+      - "12345:12345"
+    depends_on: [loki]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.2.2
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: marche-admin
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on: [prometheus, loki]
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  prometheus_data:
+  loki_data:
+  alloy_data:
+  grafana_data:

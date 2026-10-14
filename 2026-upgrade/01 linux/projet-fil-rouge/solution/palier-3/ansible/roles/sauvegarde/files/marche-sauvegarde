@@ -1,0 +1,46 @@
+#!/bin/bash
+# marche-sauvegarde — la base « marche » vers le dépôt restic de bak1, à travers WireGuard.
+# Lancé par marche-sauvegarde.timer (toutes les heures : RPO d'une heure au plus).
+set -Eeuo pipefail
+trap 'echo "ÉCHEC ligne $LINENO (code $?) : $BASH_COMMAND" >&2' ERR
+set -a; . /etc/restic/marche.env; set +a
+
+exec 9>/run/marche-sauvegarde.lock
+flock -n 9 || { echo "Une sauvegarde est déjà en cours." >&2; exit 1; }
+
+d=/var/lib/marche-sauvegarde
+install -d -m 700 "$d"
+
+# 0. Garde-fou du plan de reprise. Sur une db1 reconstruite, la base est vide… ou PRESQUE : dès
+#    que web1 la joint, le générateur de trafic y écrit (vécu : 22 commandes, contre 73 000 dans
+#    le dépôt). La sauvegarder ferait d'elle le « dernier instantané », celui que la restauration
+#    prendrait. Chaque instantané porte donc son nombre de commandes (étiquette commandes=N), et
+#    on refuse une base qui en a moins de la moitié.
+n=$(runuser -u postgres -- psql -tAc "select count(*) from orders" marche 2>/dev/null || echo 0)
+# Dans une variable, pas « restic … | grep -q » : sous pipefail, grep -q qui s'arrête tôt peut
+# faire échouer le tube (SIGPIPE) ; et si bak1 est injoignable, set -e arrête ici le script au
+# lieu de conclure « dépôt vide ».
+dernier=$(restic snapshots --tag marche --latest 1 --json)
+precedent=""
+[[ $dernier =~ \"commandes=([0-9]+)\" ]] && precedent=${BASH_REMATCH[1]}
+if [[ $dernier != *'"id"'* ]]; then
+    [ "$n" -gt 0 ] || { echo "Base vide et dépôt vide (installation neuve) : rien à sauvegarder pour l'instant."; exit 0; }
+elif [ -z "${MARCHE_SAUVEGARDE_FORCE:-}" ] && { [ "$n" -eq 0 ] || [ $((n * 2)) -lt "${precedent:-0}" ]; }; then
+    echo "REFUS : $n commandes dans la base, ${precedent:-?} dans le dernier instantané." >&2
+    echo "        Base reconstruite ? Restaurez d'abord (marche-restauration). Volontaire : MARCHE_SAUVEGARDE_FORCE=1" >&2
+    exit 1
+fi
+
+# 1. Dump complet SUR DISQUE, vérifié AVANT l'envoi. (« pg_dump | restic backup --stdin » :
+#    si pg_dump meurt en route, restic enregistre quand même un instantané tronqué, « réussi ».)
+runuser -u postgres -- pg_dump -Fc marche > "$d/marche.dump.tmp"
+pg_restore -l "$d/marche.dump.tmp" > /dev/null          # lisible de bout en bout ?
+mv "$d/marche.dump.tmp" "$d/marche.dump"
+
+# 2. Envoi chiffré (côté db1) et dédupliqué
+restic backup --quiet --tag marche --tag "commandes=$n" "$d/marche.dump"
+
+# 3. Rétention : 24 dernières heures, 7 jours, 4 semaines
+restic forget --quiet --tag marche --keep-last 24 --keep-daily 7 --keep-weekly 4 --prune
+
+echo "Sauvegarde OK : $(restic snapshots --tag marche --latest 1 --compact | awk 'NR==3 {print $1, $2, $3}')"

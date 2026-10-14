@@ -1,0 +1,36 @@
+# /etc/fail2ban/jail.local — surcharge locale (ne JAMAIS modifier jail.conf)
+[DEFAULT]
+banaction = nftables-multiport
+banaction_allports = nftables-allports
+bantime  = 1h
+findtime = 10m
+maxretry = 5
+# 10.10.10.1 = la passerelle du lab : tout ce qui vient de l'hôte (votre SSH par rebond,
+# vos tunnels) arrive avec cette adresse. La bannir, c'est se bannir soi-même.
+ignoreip = 127.0.0.1/8 ::1 10.10.10.1
+
+[sshd]
+enabled = true
+
+# Les robots qui cherchent /wp-login.php, /.env, /phpmyadmin… (cf. l'enquête du Palier 1)
+[nginx-botsearch]
+enabled  = true
+port     = http,https
+logpath  = /var/log/nginx/marche.access.log
+maxretry = 3
+
+# Les récidivistes : banni 3 fois en un jour → banni une semaine, sur tous les ports
+[recidive]
+enabled  = true
+bantime  = 1w
+findtime = 1d
+
+# Filtre maison (voir filter.d/marche-sondes.conf) : 5 sondes en 10 minutes → un jour de bannissement
+[marche-sondes]
+enabled  = true
+port     = http,https
+filter   = marche-sondes
+logpath  = /var/log/nginx/marche.access.log
+maxretry = 5
+findtime = 10m
+bantime  = 1d

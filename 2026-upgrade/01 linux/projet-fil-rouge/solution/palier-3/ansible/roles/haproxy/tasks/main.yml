@@ -1,0 +1,34 @@
+---
+- name: HAProxy
+  ansible.builtin.apt:
+    name: [haproxy, socat]
+    state: present
+
+- name: Dossier des certificats
+  ansible.builtin.file:
+    path: /etc/haproxy/certs
+    state: directory
+    mode: "0700"
+
+# HAProxy veut le certificat ET la clé dans un seul fichier .pem
+- name: "Certificat du site (même certificat sur les deux répartiteurs : l'IP virtuelle bascule)"
+  ansible.builtin.copy:
+    dest: /etc/haproxy/certs/marche.pem
+    content: "{{ lookup('ansible.builtin.file', pki + '/marche-vip.crt') }}\n{{ lookup('ansible.builtin.file', pki + '/marche-vip.key') }}\n"
+    mode: "0600"
+  no_log: true
+  notify: Recharger haproxy
+
+- name: Configuration (validée par haproxy -c AVANT d'être écrite)
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    mode: "0644"
+    validate: haproxy -c -f %s
+  notify: Recharger haproxy
+
+- name: HAProxy démarré
+  ansible.builtin.systemd_service:
+    name: haproxy
+    state: started
+    enabled: true

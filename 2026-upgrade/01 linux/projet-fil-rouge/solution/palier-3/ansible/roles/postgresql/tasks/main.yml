@@ -1,0 +1,53 @@
+---
+- name: PostgreSQL et le pilote Python des modules Ansible
+  ansible.builtin.apt:
+    name: [postgresql, python3-psycopg2]
+    state: present
+
+- name: Trouver la version installée (le chemin /etc/postgresql/<version>/main en dépend)
+  ansible.builtin.shell: pg_lsclusters --no-header | awk 'NR==1 {print $1}'
+  register: pg_version
+  changed_when: false
+
+- name: Écouter sur le réseau privé (en plus de localhost)
+  ansible.builtin.copy:
+    dest: "/etc/postgresql/{{ pg_version.stdout }}/main/conf.d/marche.conf"
+    mode: "0644"
+    content: |
+      # Géré par Ansible (rôle postgresql)
+      listen_addresses = 'localhost,{{ ansible_host }}'
+      password_encryption = scram-sha-256
+  notify: Redémarrer postgresql     # listen_addresses exige un redémarrage, pas un reload
+
+- name: pg_hba — seuls les serveurs web, seulement la base marche, mot de passe chiffré
+  community.postgresql.postgresql_pg_hba:
+    dest: "/etc/postgresql/{{ pg_version.stdout }}/main/pg_hba.conf"
+    contype: host
+    databases: marche
+    users: marche
+    source: "{{ hostvars[item]['ansible_host'] }}/32"
+    method: scram-sha-256
+  loop: "{{ groups['web'] }}"
+  notify: Recharger postgresql
+
+- name: PostgreSQL démarré
+  ansible.builtin.systemd_service:
+    name: postgresql
+    state: started
+    enabled: true
+
+- name: Appliquer tout de suite un éventuel redémarrage (le rôle et la base en ont besoin)
+  ansible.builtin.meta: flush_handlers
+
+- name: Rôle marche
+  community.postgresql.postgresql_user:
+    name: marche
+    password: "{{ vault_db_mdp }}"
+  become_user: postgres
+  no_log: true
+
+- name: Base marche, propriété du rôle marche
+  community.postgresql.postgresql_db:
+    name: marche
+    owner: marche
+  become_user: postgres

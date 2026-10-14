@@ -1,0 +1,104 @@
+apiVersion: 1
+
+# Palier 3 : les 4 signaux reliés entre eux.
+#   métrique ──exemplar──▶ trace ──trace→logs──▶ logs ──derived field──▶ trace
+#                               └──trace→métriques / service map──▶ Mimir
+datasources:
+  # Réplique A, interrogée directement : données récentes, requêtes rapides
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus-a:9090
+    isDefault: true
+    editable: false
+    basicAuth: true
+    basicAuthUser: admin
+    secureJsonData:
+      basicAuthPassword: $__file{/run/secrets/prometheus_password}
+    jsonData:
+      httpMethod: POST
+      prometheusType: Prometheus
+      timeInterval: 15s
+      exemplarTraceIdDestinations:
+        - name: trace_id           # nom du label de l'exemplar
+          datasourceUid: tempo
+
+  # Mimir : long terme, dédoublonné (les deux répliques ne comptent qu'une fois)
+  - name: Mimir
+    type: prometheus
+    uid: mimir
+    access: proxy
+    url: http://mimir:9009/prometheus
+    editable: false
+    jsonData:
+      httpMethod: POST
+      prometheusType: Mimir
+      timeInterval: 15s
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
+
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        # trace_id est une « structured metadata » (voir Alloy) → matcherType: label
+        - name: trace_id
+          matcherType: label
+          matcherRegex: trace_id
+          datasourceUid: tempo
+          url: "$${__value.raw}"         # $$ : échappe l'interpolation de variables d'env du provisioning
+          urlDisplayLabel: Voir la trace
+
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      streamingEnabled:
+        search: true
+        metrics: true
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: "-2m"
+        spanEndTimeShift: "2m"
+        filterByTraceID: true
+        tags:
+          - key: service.name        # attribut de ressource OTel…
+            value: service           # …traduit en label Loki
+      tracesToMetrics:
+        datasourceUid: mimir
+        spanStartTimeShift: "-10m"
+        spanEndTimeShift: "10m"
+        tags:
+          - key: service.name
+            value: service
+        queries:
+          - name: Taux d'erreurs du service
+            query: sum(rate(http_requests_total{$$__tags, status=~"5.."}[5m])) / sum(rate(http_requests_total{$$__tags}[5m]))
+          - name: Latence p95 du service
+            query: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{$$__tags}[5m])))
+      serviceMap:
+        datasourceUid: mimir        # métriques traces_service_graph_* poussées par Tempo
+      nodeGraph:
+        enabled: true
+      lokiSearch:
+        datasourceUid: loki
+
+  - name: Alertmanager
+    type: alertmanager
+    uid: alertmanager
+    access: proxy
+    url: http://alertmanager-a:9093
+    editable: false
+    jsonData:
+      implementation: prometheus
+      handleGrafanaManagedAlerts: false

@@ -1,0 +1,127 @@
+---
+# Le serveur web du Palier 2, sans base locale : PostgreSQL est sur db1, TLS sur les répartiteurs.
+- name: Paquets
+  ansible.builtin.apt:
+    name: [python3-venv, nginx]
+    state: present
+
+- name: Compte de service marche (système, sans shell)
+  ansible.builtin.user:
+    name: marche
+    system: true
+    home: /opt/marche
+    create_home: false
+    shell: /usr/sbin/nologin
+
+- name: "Arborescence (le code appartient à root : le service ne peut pas le réécrire)"
+  ansible.builtin.file:
+    path: "{{ item.chemin }}"
+    state: directory
+    owner: "{{ item.proprio }}"
+    group: "{{ item.groupe }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { chemin: /opt/marche, proprio: root, groupe: marche, mode: "0750" }
+    - { chemin: /opt/marche/releases, proprio: root, groupe: root, mode: "0755" }
+    - { chemin: /opt/marche/livraison, proprio: root, groupe: root, mode: "0700" }
+    - { chemin: /var/lib/marche, proprio: marche, groupe: marche, mode: "0750" }
+    - { chemin: /var/log/marche, proprio: root, groupe: root, mode: "0750" }
+    - { chemin: /etc/marche, proprio: root, groupe: marche, mode: "0750" }
+
+- name: Le secret — DATABASE_URL vers db1
+  ansible.builtin.template:
+    src: marche.env.j2
+    dest: /etc/marche/marche.env
+    owner: root
+    group: marche
+    mode: "0640"
+  no_log: true
+  notify: Redémarrer Marché
+
+- name: marchectl (celui du Palier 2) et son réglage pour ce palier
+  ansible.builtin.copy:
+    src: marchectl
+    dest: /usr/local/sbin/marchectl
+    mode: "0700"
+
+- name: marchectl contrôle la santé en HTTP (TLS est terminé sur les répartiteurs)
+  ansible.builtin.copy:
+    dest: /etc/marche/marchectl.conf
+    mode: "0600"
+    content: |
+      URL_SANTE=http://127.0.0.1/api/products
+      CA=
+
+- name: Unités systemd
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop: [marche@.service, marche.target, marche-loadgen.service]
+  notify: Redémarrer Marché
+
+- name: "Site nginx (HTTP, joignable par les répartiteurs seulement : voir le pare-feu)"
+  ansible.builtin.template:
+    src: nginx-marche.j2
+    dest: /etc/nginx/sites-available/marche
+    mode: "0644"
+  notify: Tester et recharger nginx
+
+- name: Activer le site marche, retirer le site par défaut
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/marche
+    dest: /etc/nginx/sites-enabled/marche
+    state: link
+  notify: Tester et recharger nginx
+
+- name: Retirer le site par défaut
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Tester et recharger nginx
+
+- name: Appliquer nginx maintenant (le contrôle de santé du déploiement passe par lui)
+  ansible.builtin.meta: flush_handlers
+
+- name: Livraison — l'archive et son empreinte
+  ansible.builtin.copy:
+    src: "{{ marche_livraison }}/{{ item }}"
+    dest: "/opt/marche/livraison/{{ item }}"
+    mode: "0600"
+  loop:
+    - "marche-{{ marche_version }}.tar.gz"
+    - "marche-{{ marche_version }}.tar.gz.sha256"
+
+- name: Déployer la version (marchectl ; ne fait rien si elle est déjà installée)
+  ansible.builtin.command: /usr/local/sbin/marchectl deploy /opt/marche/livraison/marche-{{ marche_version }}.tar.gz
+  args:
+    creates: "/opt/marche/releases/{{ marche_version }}"
+
+- name: Marché démarré au boot
+  ansible.builtin.systemd_service:
+    name: marche.target
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Certificat de l'IP virtuelle, pour que le générateur de trafic le VÉRIFIE
+  ansible.builtin.copy:
+    src: "{{ pki }}/marche-vip.crt"
+    dest: /etc/ssl/certs/marche-vip.crt
+    mode: "0644"
+
+- name: Générateur de trafic (web1 seulement), à travers l'IP virtuelle
+  ansible.builtin.systemd_service:
+    name: marche-loadgen
+    state: "{{ 'started' if marche_loadgen | default(false) else 'stopped' }}"
+    enabled: "{{ marche_loadgen | default(false) }}"
+
+- name: Quelle version est réellement en service ?
+  ansible.builtin.command: readlink -f /opt/marche/current
+  register: courante
+  changed_when: false
+
+- name: "La version en service est celle de l'inventaire (sinon : un rollback manuel n'a pas été reporté)"
+  ansible.builtin.assert:
+    that: courante.stdout == '/opt/marche/releases/' + marche_version
+    fail_msg: "{{ inventory_hostname }} sert {{ courante.stdout | basename }} au lieu de {{ marche_version }}"

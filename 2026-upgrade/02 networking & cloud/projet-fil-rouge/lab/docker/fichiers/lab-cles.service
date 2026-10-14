@@ -1,0 +1,15 @@
+# Clés PROPRES À CHAQUE MACHINE, créées à son premier démarrage (comme cloud-init chez un
+# hébergeur) : clés d'hôte SSH et certificat « snakeoil » (celui de PostgreSQL par défaut).
+# Générées pendant la construction de l'image, elles seraient identiques sur toutes les machines.
+# (Pas « Before=ssh.socket » : cycle d'ordonnancement avec basic.target — vu dans le lab Linux.)
+[Unit]
+Description=Clés propres à cette machine (SSH, snakeoil)
+Before=ssh.service postgresql.service
+ConditionPathExists=!/var/lib/lab-cles-faites
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/lab-cles
+
+[Install]
+WantedBy=multi-user.target

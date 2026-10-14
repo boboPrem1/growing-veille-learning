@@ -1,0 +1,23 @@
+# Géré par Ansible (rôle marche) — trafic simulé À TRAVERS l'IP virtuelle et HAProxy,
+# comme un vrai client : il voit les bascules.
+[Unit]
+Description=Marché — générateur de trafic (vers {{ vip }})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=marche
+Group=marche
+WorkingDirectory=/opt/marche/current
+Environment=SERVICE_NAME=loadgen
+Environment=GATEWAY_URL=https://{{ vip }}
+Environment=SSL_CA_FILE=/etc/ssl/certs/marche-vip.crt
+ExecStart=/opt/marche/current/venv/bin/python loadgen.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Marché — contrôle de santé
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/marche-healthcheck

@@ -1,0 +1,14 @@
+# Géré par Ansible (rôle wireguard) — {{ inventory_hostname }}
+[Interface]
+Address = {{ wg_ip }}/24
+ListenPort = {{ wg_port }}
+PrivateKey = {{ wg_prive.content | b64decode | trim }}
+{% for pair in groups['wireguard'] | difference([inventory_hostname]) %}
+
+# {{ pair }}
+[Peer]
+PublicKey = {{ hostvars[pair]['wg_cle_publique'] }}
+Endpoint = {{ hostvars[pair]['ansible_host'] }}:{{ wg_port }}
+AllowedIPs = {{ hostvars[pair]['wg_ip'] }}/32
+PersistentKeepalive = 25
+{% endfor %}

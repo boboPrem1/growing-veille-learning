@@ -1,0 +1,6 @@
+[Unit]
+Description=Marché — les trois services
+Wants=marche@gateway.service marche@orders.service marche@payments.service
+
+[Install]
+WantedBy=multi-user.target

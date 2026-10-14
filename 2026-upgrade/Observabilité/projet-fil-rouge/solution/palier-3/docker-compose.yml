@@ -1,0 +1,368 @@
+# Solution de référence — Palier 3 : traces, corrélation, passage à l'échelle, HA, SLO, sécurité.
+#
+#   1. Créer les secrets (une fois) :  voir secrets/README.md
+#   2. docker compose up -d --build
+#   3. https://localhost:8443  (Grafana, seul point d'entrée ; certificat de la CA locale de Caddy)
+#
+# Réseaux :
+#   app   — l'application et ce qui doit lui parler (scrapers, collector)
+#   obs   — la stack d'observabilité, INTERNE : aucun accès sortant, aucun port publié
+#   front — l'exposition : Caddy (HTTPS) → Grafana ; Mailpit en local
+
+name: marche
+
+x-app: &app
+  build: ./app
+  restart: unless-stopped
+  networks: [app]
+
+x-app-env: &app-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  OTEL_TRACES_SAMPLER: parentbased_always_on
+  OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=lab
+
+x-scrape-app: &scrape-app
+  prometheus.scrape: "true"
+  prometheus.job: app
+
+x-prometheus: &prometheus
+  image: prom/prometheus:v3.15.0
+  command:
+    - --config.file=/etc/prometheus/prometheus.yml
+    - --web.config.file=/etc/prometheus/web-config.yml
+    - --storage.tsdb.path=/prometheus
+    - --storage.tsdb.retention.time=2d        # le long terme est dans Mimir
+    - --enable-feature=exemplar-storage
+    - --web.enable-lifecycle
+  secrets: [prometheus_password]
+  networks: [app, obs]
+  restart: unless-stopped
+
+x-alertmanager: &alertmanager
+  image: prom/alertmanager:v0.34.1
+  networks: [obs]
+  restart: unless-stopped
+
+services:
+  # ================================================================ application
+  postgres:
+    image: postgres:17.11-alpine
+    container_name: marche-postgres
+    environment:
+      POSTGRES_USER: marche
+      POSTGRES_PASSWORD: marche
+      POSTGRES_DB: marche
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marche -d marche"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [app]
+    restart: unless-stopped
+
+  gateway:
+    <<: *app
+    container_name: marche-gateway
+    command: ["python", "gateway.py"]
+    environment:
+      <<: *app-env
+      SERVICE_NAME: gateway
+      SERVICE_VERSION: "1.2.0"
+      ORDERS_URL: http://orders:8001
+    ports:
+      - "8000:8000"
+    labels:
+      <<: *scrape-app
+      prometheus.port: "8000"
+    depends_on: [orders, otel-collector]
+
+  orders:
+    <<: *app
+    container_name: marche-orders
+    command: ["python", "orders.py"]
+    environment:
+      <<: *app-env
+      SERVICE_NAME: orders
+      SERVICE_VERSION: "1.2.0"
+      DATABASE_URL: postgresql://marche:marche@postgres:5432/marche
+      PAYMENTS_URL: http://payments:8002
+    ports:
+      - "127.0.0.1:8001:8001"
+    labels:
+      <<: *scrape-app
+      prometheus.port: "8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      payments:
+        condition: service_started
+
+  payments:
+    <<: *app
+    container_name: marche-payments
+    command: ["python", "payments.py"]
+    environment:
+      <<: *app-env
+      SERVICE_NAME: payments
+      SERVICE_VERSION: "1.2.0"
+    ports:
+      - "127.0.0.1:8002:8002"
+    labels:
+      <<: *scrape-app
+      prometheus.port: "8002"
+    depends_on: [otel-collector]
+
+  loadgen:
+    <<: *app
+    container_name: marche-loadgen
+    command: ["python", "loadgen.py"]
+    environment:
+      GATEWAY_URL: http://gateway:8000
+      RPS: "5"
+    depends_on: [gateway]
+
+  # ================================================================ collecte
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.161.0
+    container_name: otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    networks: [app, obs]
+    restart: unless-stopped
+
+  # Proxy en lecture seule devant le socket Docker : seules les routes nécessaires au
+  # service discovery et à la lecture des logs sont autorisées (pas de POST, pas d'exec).
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    container_name: docker-socket-proxy
+    environment:
+      CONTAINERS: 1
+      NETWORKS: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [obs]
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.20.0
+    container_name: alloy
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy_data:/var/lib/alloy/data
+    networks: [obs]
+    depends_on: [loki, docker-socket-proxy]
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.12.1
+    container_name: node-exporter
+    command: [--path.rootfs=/host]
+    pid: host
+    volumes:
+      - /:/host:ro
+    networks: [obs]
+    restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.55.1
+    container_name: cadvisor
+    privileged: true          # ⚠ nécessaire pour lire les cgroups : isoler ce conteneur (réseau obs)
+    devices:
+      - /dev/kmsg
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=15s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.service,com.docker.compose.project
+      - --disable_metrics=percpu,sched,tcp,udp,disk,diskIO,hugetlb,referenced_memory,cpu_topology,resctrl,advtcp,process
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks: [obs]
+    restart: unless-stopped
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.20.1
+    container_name: postgres-exporter
+    environment:
+      DATA_SOURCE_URI: postgres:5432/marche?sslmode=disable
+      DATA_SOURCE_USER: marche
+      DATA_SOURCE_PASS: marche
+    labels:
+      prometheus.scrape: "true"
+      prometheus.port: "9187"
+      prometheus.job: database
+    networks: [app, obs]
+    restart: unless-stopped
+
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.28.0
+    container_name: blackbox-exporter
+    command: [--config.file=/etc/blackbox/blackbox.yml]
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    networks: [app, obs]
+    restart: unless-stopped
+
+  # ================================================================ métriques (HA)
+  prometheus-a:
+    <<: *prometheus
+    container_name: prometheus-a
+    environment:
+      PROM_REPLICA: a
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/web-config.yml:/etc/prometheus/web-config.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_a_data:/prometheus
+
+  prometheus-b:
+    <<: *prometheus
+    container_name: prometheus-b
+    environment:
+      PROM_REPLICA: b
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/web-config.yml:/etc/prometheus/web-config.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_b_data:/prometheus
+
+  mimir:
+    image: grafana/mimir:3.2.1
+    container_name: mimir
+    command: ["-config.file=/etc/mimir/mimir.yaml", "-target=all"]
+    volumes:
+      - ./mimir/mimir.yaml:/etc/mimir/mimir.yaml:ro
+      - mimir_data:/data
+    networks: [obs]
+    restart: unless-stopped
+
+  # ================================================================ alerting (cluster)
+  alertmanager-a:
+    <<: *alertmanager
+    container_name: alertmanager-a
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --cluster.listen-address=0.0.0.0:9094
+      - --cluster.peer=alertmanager-b:9094
+    volumes:
+      - ./alertmanager:/etc/alertmanager:ro
+      - alertmanager_a_data:/alertmanager
+
+  alertmanager-b:
+    <<: *alertmanager
+    container_name: alertmanager-b
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --cluster.listen-address=0.0.0.0:9094
+      - --cluster.peer=alertmanager-a:9094
+    volumes:
+      - ./alertmanager:/etc/alertmanager:ro
+      - alertmanager_b_data:/alertmanager
+
+  mailpit:
+    image: axllent/mailpit:v1.31.3
+    container_name: mailpit
+    ports:
+      - "127.0.0.1:8025:8025"
+    networks: [obs, front]
+    restart: unless-stopped
+
+  # ================================================================ logs & traces
+  loki:
+    image: grafana/loki:3.7.8
+    container_name: loki
+    command: -config.file=/etc/loki/loki-config.yaml
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki_data:/loki
+    networks: [obs]
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:3.0.3
+    container_name: tempo
+    command: ["-target=all", "-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    networks: [obs]
+    depends_on: [mimir]
+    restart: unless-stopped
+
+  # ================================================================ présentation
+  grafana:
+    image: grafana/grafana:13.2.2
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_SERVER_ROOT_URL: https://localhost:8443/
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_COOKIE_SAMESITE: strict
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SMTP_ENABLED: "true"
+      GF_SMTP_HOST: mailpit:1025
+      GF_SMTP_FROM_ADDRESS: grafana@marche.local
+      GF_SMTP_STARTTLS_POLICY: NoStartTLS
+    secrets: [grafana_admin_password, prometheus_password]
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    networks: [obs, front]
+    depends_on: [prometheus-a, loki, tempo, mimir]
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.11.4-alpine
+    container_name: caddy
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    networks: [front]
+    depends_on: [grafana]
+    restart: unless-stopped
+
+networks:
+  app: {}
+  obs:
+    internal: true
+  front: {}
+
+secrets:
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password.txt
+  prometheus_password:
+    file: ./secrets/prometheus_password.txt
+
+volumes:
+  postgres_data:
+  prometheus_a_data:
+  prometheus_b_data:
+  alertmanager_a_data:
+  alertmanager_b_data:
+  mimir_data:
+  loki_data:
+  tempo_data:
+  alloy_data:
+  grafana_data:
+  caddy_data:
